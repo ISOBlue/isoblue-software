@@ -1,0 +1,13 @@
+# c object files
+*.o
+*.ko
+
+# Kernel module junk
+*.o.cmd
+*.ko.cmd
+modules.order
+Module.symvers
+
+# Make tmp files
+.tmp_versions/
+
