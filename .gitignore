@@ -5,6 +5,7 @@
 # Kernel module junk
 *.o.cmd
 *.ko.cmd
+*.mod.c
 modules.order
 Module.symvers
 
