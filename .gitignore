@@ -12,3 +12,8 @@ Module.symvers
 # Make tmp files
 .tmp_versions/
 
+# vim stuff
+.vimtags
+*.swp
+*.swo
+
