@@ -8,10 +8,10 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
  
-#include "socketcan-isobus/patched/can.h"
-#include "socketcan-isobus/pdu.h"
+#include "../socketcan-isobus/patched/can.h"
+#include "../socketcan-isobus/pdu.h"
  
-int main(void) {
+int main(int argc, char *argv[]) {
 	int s;
 	int nbytes;
 	struct sockaddr_can addr;
@@ -22,24 +22,37 @@ int main(void) {
 	struct iovec iov;
 
 	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval))+CMSG_SPACE(sizeof(__u32))];
-	char *ifname = "vcan0";
+
+	struct can_filter filter;
+	__u32 pgn;
 
 	if((s = socket(PF_CAN, SOCK_RAW, CAN_PDU)) < 0) {
 		perror("Error while opening socket");
 		return -1;
 	}
 
-	strcpy(ifr.ifr_name, ifname);
+	/* Set interface name to first argument */
+	strcpy(ifr.ifr_name, argv[1]);
 	ioctl(s, SIOCGIFINDEX, &ifr);
 
 	addr.can_family  = AF_CAN;
 	addr.can_ifindex = ifr.ifr_ifindex; 
+
+	if(argc > 2) {
+		/* Only receive a certain PGN */
+		sscanf(argv[2], "%d", &pgn);
+		printf("%d\n", pgn);
+		filter.can_id = (0x3ffff & pgn) << 8;
+		filter.can_mask = 0x3ffff << 8;
+		setsockopt(s, SOL_CAN_PDU, CAN_PDU_FILTER, &filter, sizeof(filter));
+	}
 
 	if(bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		perror("Error in socket bind");
 		return -2;
 	}
 
+	/* Construct msghdr to use to recevie messages from socket */
 	msg.msg_iov = &iov;
 	msg.msg_control = &ctrlmsg;
 	msg.msg_controllen = sizeof(ctrlmsg);
