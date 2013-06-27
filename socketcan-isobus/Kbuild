@@ -1,0 +1,12 @@
+obj-m	+= can.o
+can-y	:=patched/af_can.o patched/proc.o
+
+#obj-m	+= can-isobus.o
+#can-isobus-y	:= isobus.o
+
+obj-m	+= can-isobus-pdu.o
+can-isobus-pdu-y	:= pdu.o
+
+# Put debug symbols in the modules
+ccflags-y += -g
+
