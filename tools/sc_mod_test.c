@@ -41,9 +41,15 @@ int main(int argc, char *argv[]) {
 	if(argc > 2) {
 		/* Only receive a certain PGN */
 		sscanf(argv[2], "%d", &pgn);
-		printf("%d\n", pgn);
 		filter.can_id = (0x3ffff & pgn) << 8;
-		filter.can_mask = 0x3ffff << 8;
+		/* Some PGNs include the PS field and some don't */
+		if(pgn <= 0xef00) {
+			/* PDU1, don't include PS in PGN */
+			filter.can_mask = 0x3ff00 << 8;
+		} else {
+			/* PDU2, do include PS in PGN */
+			filter.can_mask = 0x3ffff << 8;
+		}
 		setsockopt(s, SOL_CAN_PDU, CAN_PDU_FILTER, &filter, sizeof(filter));
 	}
 
