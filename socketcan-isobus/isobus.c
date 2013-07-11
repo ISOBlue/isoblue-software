@@ -1,5 +1,5 @@
 /*
- * pdu.c - Raw sockets for protocol family CAN
+ * isobus.c - ISOBUS sockets for protocol family CAN
  *
  * Copyright (c) 2002-2007 Volkswagen Group Electronic Research
  * All rights reserved.
@@ -41,6 +41,8 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/hrtimer.h>
 #include <linux/uio.h>
 #include <linux/net.h>
 #include <linux/slab.h>
@@ -50,24 +52,25 @@
 #include <linux/skbuff.h>
 #include "patched/can.h" /* #include <linux/can.h> */
 #include <linux/can/core.h>
-#include "pdu.h" /* #include <linux/can/pdu.h> */
+#include "isobus.h" /* #include <linux/can/isobus.h> */
 #include <net/sock.h>
 #include <net/net_namespace.h>
 
-#define CAN_PDU_VERSION CAN_VERSION
+#define CAN_ISOBUS_VERSION CAN_VERSION
 static __initconst const char banner[] =
-	KERN_INFO "can: pdu protocol (rev " CAN_PDU_VERSION ")\n";
+	KERN_INFO "can: isobus protocol (rev " CAN_ISOBUS_VERSION ")\n";
 
-MODULE_DESCRIPTION("PF_CAN isobus pdu protocol");
+MODULE_DESCRIPTION("PF_CAN isobus 11783 protocol");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Alex Layton <awlayton@purdue.edu>, "
-		"Urs Thuermann <urs.thuermann@volkswagen.de>");
-MODULE_ALIAS("can-proto-7");
+		"Urs Thuermann <urs.thuermann@volkswagen.de>, "
+		"Oliver Hartkopp <oliver.hartkopp@volkswagen.de>");
+MODULE_ALIAS("can-proto-8");
 
 #define MASK_ALL 0
 
 /*
- * A pdu socket has a list of can_filters attached to it, each receiving
+ * A isobus socket has a list of can_filters attached to it, each receiving
  * the CAN frames matching that filter.  If the filter list is empty,
  * no CAN frames will be received by the socket.  The default after
  * opening the socket, is to have one filter which receives all frames.
@@ -75,8 +78,7 @@ MODULE_ALIAS("can-proto-7");
  * list containing only one item.  This common case is optimized by
  * storing the single filter in dfilter, to avoid using dynamic memory.
  */
-
-struct pdu_sock {
+struct isobus_sock {
 	struct sock sk;
 	int bound;
 	int ifindex;
@@ -88,14 +90,42 @@ struct pdu_sock {
 	struct can_filter dfilter; /* default/single filter */
 	struct can_filter *filter; /* pointer to filter(s) */
 	can_err_mask_t err_mask;
+
+	__u8 pref_addr;
+	__u8 s_addr;
+	struct isobus_name name;
+	enum {
+		ISOBUS_IDLE = 0,
+		ISOBUS_WAIT_ADDR,
+		ISOBUS_WAIT_ADDR_CLAIM,
+		ISOBUS_HAVE_ADDR,
+		ISOBUS_LOST_ADDR
+	} state;
+	struct hrtimer timer;
+	struct tasklet_struct tsklet;
+	wait_queue_head_t wait;
+};
+
+/* Netowrk management messages */
+static const struct isobus_mesg req_addr_claimed_mesg = {
+	ISOBUS_PGN_REQUEST,
+	3,
+	{(ISOBUS_PGN_ADDR_CLAIMED >> 16) & 0xFF,
+		(ISOBUS_PGN_ADDR_CLAIMED >> 8) & 0xFF,
+		ISOBUS_PGN_ADDR_CLAIMED & 0xFF},
+};
+static struct isobus_mesg addr_claimed_mesg = {
+	ISOBUS_PGN_ADDR_CLAIMED,
+	8,
+	{0, 0, 0, 0, 0, 0, 0, 0},
 };
 
 /*
- * Return pointer to store the extra msg flags for pdu_recvmsg().
+ * Return pointer to store the extra msg flags for isobus_recvmsg().
  * We use the space of one unsigned int beyond the 'struct sockaddr_can'
  * in skb->cb.
  */
-static inline unsigned int *pdu_flags(struct sk_buff *skb)
+static inline unsigned int *isobus_flags(struct sk_buff *skb)
 {
 	BUILD_BUG_ON(sizeof(skb->cb) <= (sizeof(struct sockaddr_can) +
 					 sizeof(unsigned int)));
@@ -104,22 +134,52 @@ static inline unsigned int *pdu_flags(struct sk_buff *skb)
 	return (unsigned int *)(&((struct sockaddr_can *)skb->cb)[1]);
 }
 
-static inline struct pdu_sock *pdu_sk(const struct sock *sk)
+static inline struct isobus_sock *isobus_sk(const struct sock *sk)
 {
-	return (struct pdu_sock *)sk;
+	return (struct isobus_sock *)sk;
 }
 
+/* Macros for accessing the fields that make up a PGN */
+#define CANID_PS(id)	((id >> 8) & 0xFF)
+#define CANID_PF(id)	((id >> 16) & 0xFF)
+#define CANID_DP(id)	((id >> 24) & 1)
+#define CANID_EDP(id)	((id >> 25) & 1)
+#define CANID_PDU_FMT(id) (CANID_PF(id) < 240 ? 1 : 2)
+#define PGN_PS(pgn)	CANID_PS(pgn << 8)
+#define PGN_PF(pgn)	CANID_PF(pgn << 8)
+#define PGN_DP(pgn)	CANID_DP(pgn << 8)
+#define PGN_EDP(pgn)	CANID_EDP(pgn << 8)
+#define PGN_PDU_FMT(pgn)	CANID_PDU_FMT(pgn << 8)
+/* Determine the PGN of a CAN frame */
+static inline pgn_t get_pgn(canid_t id)
+{
+	pgn_t pgn;
+
+	/* PDU1 format */
+	if(CANID_PDU_FMT(id) == 1) {
+		pgn = (id >> 8) & 0x3FF00;
+	}
+	/* PDU2 format */
+	else {
+		pgn = (id >> 8) & 0x3FFFF;
+	}
+
+	return pgn;
+}
+#define CANID_SA(id) (id & 0xFF)
+
 /* Called when a CAN frame is received */
-static void pdu_rcv(struct sk_buff *oskb, void *data)
+/* TODO: Add support for connections */
+static void isobus_rcv(struct sk_buff *oskb, void *data)
 {
 	struct sock *sk = (struct sock *)data;
-	struct pdu_sock *ro = pdu_sk(sk);
+	struct isobus_sock *ro = isobus_sk(sk);
 	struct sockaddr_can *addr;
 	struct sk_buff *skb;
 	unsigned int *pflags;
 
-	struct pdu *p;
 	struct can_frame *cf;
+	struct isobus_mesg *mesg;
 
 	/* set pointer to received CAN frame */
 	cf = (struct can_frame *) oskb->data;
@@ -138,45 +198,47 @@ static void pdu_rcv(struct sk_buff *oskb, void *data)
 		}
 	}
 
-	/* Create skb to put PDU in */
-	skb = alloc_skb(cf->can_dlc, gfp_any());
+	/* Check for invalid PGNs */
+	if(CANID_EDP(cf->can_id)) {
+		if(CANID_DP(cf->can_id)) {
+			/* 
+			 * Check for ISO 15765-3 PGNs which can coexist with ISO 11783 PGNs
+			 * but have a different format for the CAN identifier.
+			 * TODO: Tell SocketCAN to filter these frames out for this module.
+			 */
+			printk(KERN_NOTICE "ISO 15765-3 PGN encountered\n");
+		} else {
+			/* 
+			 * Check for ISO 11783 reserved PGNs which do not yet have a
+			 * defined stucture, so nothing can be done with them yet.
+			 * TODO: Tell SocketCAN to filter these frames out for this module.
+			 */
+			printk(KERN_NOTICE "ISO 11783 reserved PGN encountered\n");
+		}
+		return;
+	}
+
+	/* Create skb to put ISOBUS message in */
+	skb = alloc_skb(sizeof(*mesg), gfp_any());
 	if (!skb) {
 		return;
 	}
 	skb->tstamp = oskb->tstamp;
 	skb->dev = oskb->dev;
 
-	/* Copy PDU into the skb */
-	p = (struct pdu *)skb_put(skb, sizeof(struct pdu));
-	if(!p) {
+	/* Copy ISOBUS message into the skb */
+	mesg = (struct isobus_mesg *)skb_put(skb, sizeof(struct isobus_mesg));
+	if(!mesg) {
 		return;
 	}
-
-	/* Fill in PDU from CAN frame */
-	p->priority = cf->can_id >> 26;
-	p->extended_data_page = cf->can_id >> 25;
-	p->data_page = cf->can_id >> 24;
-	p->format = cf->can_id >> 16;
-	p->specific = cf->can_id >> 8;
-	p->source_address = cf->can_id;
-	p->data_len = cf->can_dlc;
-	memcpy(p->data, cf->data, p->data_len);
-
-	/* 
-	 * Check for ISO 15765-3 PGNs which can coexist with ISO 11783 PGNs
-	 * but have a different format for the CAN identifier.
-	 * TODO: Tell SocketCAN to filter these frames out for this module.
-	 */
-	if(p->extended_data_page && p->data_page) {
-		printk(KERN_NOTICE "ISO 15765-3 PGN encountered\n");
-		kfree_skb(skb);
-		return;
-	}
+	mesg->pgn = get_pgn(cf->can_id);
+	mesg->dlen = cf->can_dlc;
+	memcpy(mesg->data, cf->data, mesg->dlen);
 
 	/*
-	 *  Put the datagram to the queue so that pdu_recvmsg() can
+	 *  Put the datagram to the queue so that isobus_recvmsg() can
 	 *  get it from there.  We need to pass the interface index to
-	 *  pdu_recvmsg().  We pass a whole struct sockaddr_can in skb->cb
+	 *  isobus_recvmsg().  We pass a whole struct sockaddr_can in skb->cb
 	 *  containing the interface index.
 	 */
 
@@ -185,9 +247,10 @@ static void pdu_rcv(struct sk_buff *oskb, void *data)
 	memset(addr, 0, sizeof(*addr));
 	addr->can_family  = AF_CAN;
 	addr->can_ifindex = skb->dev->ifindex;
+	addr->can_addr.isobus.addr = CANID_SA(cf->can_id);
 
-	/* add CAN specific message flags for pdu_recvmsg() */
-	pflags = pdu_flags(skb);
+	/* add CAN specific message flags for isobus_recvmsg() */
+	pflags = isobus_flags(skb);
 	*pflags = 0;
 	if (oskb->sk)
 		*pflags |= MSG_DONTROUTE;
@@ -198,7 +261,197 @@ static void pdu_rcv(struct sk_buff *oskb, void *data)
 		kfree_skb(skb);
 }
 
-static int pdu_enable_filters(struct net_device *dev, struct sock *sk,
+/* Called when userland sends */
+/* TODO: Implement sending more than 8 bytes */
+static int isobus_sendmsg(struct kiocb *iocb, struct socket *sock,
+		       struct msghdr *msg, size_t size)
+{
+	struct sock *sk = sock->sk;
+	struct isobus_sock *ro = isobus_sk(sk);
+	struct sk_buff *skb;
+	struct net_device *dev;
+	int ifindex;
+	int err;
+	struct isobus_mesg *mesg;
+	struct sockaddr_can *addr;
+	struct can_frame *cf;
+	__u8 da;
+
+	/* Find pointer to ISOBUS message to be sent */
+	mesg = (struct isobus_mesg *)msg->msg_iov->iov_base;
+
+	/*
+	 * Get interface to send on and address to send to.
+	 * 
+	 * If the socket was bound to a particular interface use that one,
+	 * otherwise check for one passed in the message name.
+	 *
+	 * Get directed address if one was passed in.
+	 */
+	ifindex = ro->ifindex;
+	da = 0;
+	addr = (struct sockaddr_can *)msg->msg_name;
+	if(addr) {
+		/* Only PDU 1 format should have a DA */
+		if(PGN_PDU_FMT(mesg->pgn) == 1) {
+			/* TODO: Resolve address from NAME */
+			da = addr->can_addr.isobus.addr;
+		}
+
+		if (!ro->ifindex) {
+			if (msg->msg_namelen < sizeof(*addr)) {
+				printk(KERN_DEBUG "Address was the wrong size");
+				return -EINVAL;
+			}
+
+			if (addr->can_family != AF_CAN) {
+				printk(KERN_DEBUG "Address was not from CAN address family");
+				return -EINVAL;
+			}
+
+			ifindex = addr->can_ifindex;
+		}
+	} else if(PGN_PDU_FMT(mesg->pgn) == 1) {
+		/* PDU 1 format needs a DA */
+		printk(KERN_DEBUG "No address given for PDU 1 PGN");
+		return -EINVAL;
+	}
+
+	/*
+	if (ro->fd_frames) {
+		if (unlikely(size != CANFD_MTU && size != CAN_MTU))
+			return -EINVAL;
+	} else {
+		if (unlikely(size != CAN_MTU))
+			return -EINVAL;
+	}
+	*/
+
+	dev = dev_get_by_index(&init_net, ifindex);
+	if (!dev)
+		return -ENXIO;
+
+	/* Allocate an skb which will hold a can frame */
+	skb = sock_alloc_send_skb(sk, sizeof(*cf), msg->msg_flags & MSG_DONTWAIT,
+				  &err);
+	if (!skb)
+		goto put_dev;
+
+	/* Place CAN frame in skbuff */
+	cf = (struct can_frame *)skb_put(skb, sizeof(struct can_frame));
+	if(!cf) {
+		goto free_skb;
+	}
+	/* Fill out CAN frame with ISOBUS message */
+	/* TODO: Implement priority */
+	cf->can_id = (1 << 31) | ((mesg->pgn | da) << 8) | ro->s_addr;
+	memcpy(cf->data, mesg->data, cf->can_dlc = mesg->dlen);
+
+	err = sock_tx_timestamp(sk, &skb_shinfo(skb)->tx_flags);
+	if (err < 0)
+		goto free_skb;
+
+	skb->dev = dev;
+	skb->sk  = sk;
+
+	err = can_send(skb, ro->loopback);
+
+	dev_put(dev);
+	if (err)
+		goto send_failed;
+
+	return size;
+
+free_skb:
+	kfree_skb(skb);
+put_dev:
+	dev_put(dev);
+send_failed:
+	return err;
+}
+
+/* 
+ * Send an ISOBUS message (for use within this module)
+ *
+ * Rather gross thing that just warps the sendmsg call meant for userland,
+ * will rewrite if there is ever time...
+ */
+static int isobus_send(struct isobus_sock *ro, struct isobus_mesg *mesg,
+		__u8 addr)
+{
+	struct sockaddr_can s_addr;
+	struct msghdr msg;
+	struct iovec iov;
+	struct socket sock;
+
+	s_addr.can_family = PF_CAN;
+	s_addr.can_ifindex = 0;
+	s_addr.can_addr.isobus.addr = addr;
+	msg.msg_name = &s_addr;
+	msg.msg_namelen = sizeof(s_addr);
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = NULL;
+	msg.msg_controllen = 0;
+	msg.msg_flags = 0;
+	iov.iov_base = mesg;
+	iov.iov_len = sizeof(*mesg);
+	sock.sk = (struct sock *)ro;
+
+	return isobus_sendmsg(NULL, &sock, &msg, sizeof(*mesg)); 
+}
+
+/* Function for network management to process address claimed messages */
+/* TODO: Implement getting an address without a preferred one */
+/* TODO: Implement getting an address without when someone else claims yours */
+static void isobus_addr_claimed_handler(struct sk_buff *skb, void *data)
+{
+	struct sock *sk = (struct sock *)data;
+	struct isobus_sock *ro = isobus_sk(sk);
+	struct can_frame *cf;
+
+	/* set pointer to received CAN frame */
+	cf = (struct can_frame *) skb->data;
+
+	/* Check if claimed address is my preferred one */
+	/* TODO: Add NAME comparison to see if I can have address anyway */
+	if(CANID_SA(cf->can_id) == ro->pref_addr) {
+		ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+		ro->state = ISOBUS_LOST_ADDR;
+		wake_up_interruptible(&ro->wait);
+	}
+}
+
+/* 
+ * Function for network management to process request for address claimed
+ * messages
+ */
+/* TODO: Implement getting an address without when someone else claims yours */
+static void isobus_req_addr_claimed_handler(struct sk_buff *skb, void *data)
+{
+	struct sock *sk = (struct sock *)data;
+	struct isobus_sock *ro = isobus_sk(sk);
+	struct can_frame *cf;
+
+	/* set pointer to received CAN frame */
+	cf = (struct can_frame *) skb->data;
+
+	/* Discard request for things besides address claimed */
+	if(cf->can_dlc != 3 || cf->data[0] != req_addr_claimed_mesg.data[0] ||
+			cf->data[1] != req_addr_claimed_mesg.data[1] ||
+			cf->data[2] != req_addr_claimed_mesg.data[2]) {
+		return;
+	}
+
+	/* Check if claimed address is my preferred one */
+	/* TODO: Should this check be done with filters? */
+	if(CANID_PS(cf->can_id) == ro->s_addr ||
+			CANID_PS(cf->can_id) == CAN_ISOBUS_GLOBAL_ADDR) {
+		isobus_send(ro, &addr_claimed_mesg, CAN_ISOBUS_GLOBAL_ADDR);
+	}
+}
+
+static int isobus_enable_filters(struct net_device *dev, struct sock *sk,
 			      struct can_filter *filter, int count)
 {
 	int err = 0;
@@ -207,13 +460,13 @@ static int pdu_enable_filters(struct net_device *dev, struct sock *sk,
 	for (i = 0; i < count; i++) {
 		err = can_rx_register(dev, filter[i].can_id,
 				      filter[i].can_mask,
-				      pdu_rcv, sk, "pdu");
+				      isobus_rcv, sk, "isobus");
 		if (err) {
 			/* clean up successfully registered filters */
 			while (--i >= 0)
 				can_rx_unregister(dev, filter[i].can_id,
 						  filter[i].can_mask,
-						  pdu_rcv, sk);
+						  isobus_rcv, sk);
 			break;
 		}
 	}
@@ -221,67 +474,99 @@ static int pdu_enable_filters(struct net_device *dev, struct sock *sk,
 	return err;
 }
 
-static int pdu_enable_errfilter(struct net_device *dev, struct sock *sk,
+static int isobus_enable_errfilter(struct net_device *dev, struct sock *sk,
 				can_err_mask_t err_mask)
 {
 	int err = 0;
 
 	if (err_mask)
 		err = can_rx_register(dev, 0, err_mask | CAN_ERR_FLAG,
-				      pdu_rcv, sk, "pdu");
+				      isobus_rcv, sk, "isobus");
 
 	return err;
 }
 
-static void pdu_disable_filters(struct net_device *dev, struct sock *sk,
+/* Register a filter for network management PGNs */
+static int isobus_enable_nmfilters(struct net_device *dev, struct sock *sk)
+{
+	int err;
+
+	err = can_rx_register(dev, ISOBUS_PGN_ADDR_CLAIMED << 8, 
+			0x3FFFF << 8, isobus_addr_claimed_handler, sk, "isobus-nm");
+	if(err) {
+		can_rx_unregister(dev, ISOBUS_PGN_ADDR_CLAIMED << 8, 
+				0x3FFFF << 8, isobus_addr_claimed_handler, sk);
+	} else {
+		err = can_rx_register(dev, ISOBUS_PGN_REQUEST << 8, 
+				0x3FFFF << 8, isobus_req_addr_claimed_handler, sk, "isobus-nm");
+	}
+
+	return err;
+}
+
+static void isobus_disable_filters(struct net_device *dev, struct sock *sk,
 			      struct can_filter *filter, int count)
 {
 	int i;
 
 	for (i = 0; i < count; i++)
 		can_rx_unregister(dev, filter[i].can_id, filter[i].can_mask,
-				  pdu_rcv, sk);
+				  isobus_rcv, sk);
 }
 
-static inline void pdu_disable_errfilter(struct net_device *dev,
+static inline void isobus_disable_errfilter(struct net_device *dev,
 					 struct sock *sk,
 					 can_err_mask_t err_mask)
 
 {
 	if (err_mask)
 		can_rx_unregister(dev, 0, err_mask | CAN_ERR_FLAG,
-				  pdu_rcv, sk);
+				  isobus_rcv, sk);
 }
 
-static inline void pdu_disable_allfilters(struct net_device *dev,
+/* Unregister a filter for network management PGNs */
+static inline void isobus_disable_nmfilters(struct net_device *dev,
+		struct sock *sk)
+{
+	can_rx_unregister(dev, ISOBUS_PGN_ADDR_CLAIMED << 8, 
+			0x3FFFF << 8, isobus_addr_claimed_handler, sk);
+	can_rx_unregister(dev, ISOBUS_PGN_REQUEST << 8, 
+			0x3FFFF << 8, isobus_req_addr_claimed_handler, sk);
+}
+
+static inline void isobus_disable_allfilters(struct net_device *dev,
 					  struct sock *sk)
 {
-	struct pdu_sock *ro = pdu_sk(sk);
+	struct isobus_sock *ro = isobus_sk(sk);
 
-	pdu_disable_filters(dev, sk, ro->filter, ro->count);
-	pdu_disable_errfilter(dev, sk, ro->err_mask);
+	isobus_disable_filters(dev, sk, ro->filter, ro->count);
+	isobus_disable_nmfilters(dev, sk);
+	isobus_disable_errfilter(dev, sk, ro->err_mask);
 }
 
-static int pdu_enable_allfilters(struct net_device *dev, struct sock *sk)
+static int isobus_enable_allfilters(struct net_device *dev, struct sock *sk)
 {
-	struct pdu_sock *ro = pdu_sk(sk);
+	struct isobus_sock *ro = isobus_sk(sk);
 	int err;
 
-	err = pdu_enable_filters(dev, sk, ro->filter, ro->count);
-	if (!err) {
-		err = pdu_enable_errfilter(dev, sk, ro->err_mask);
-		if (err)
-			pdu_disable_filters(dev, sk, ro->filter, ro->count);
+	err = isobus_enable_filters(dev, sk, ro->filter, ro->count);
+	if(!err) {
+		err = isobus_enable_nmfilters(dev, sk);
+		if (!err) {
+			err = isobus_enable_errfilter(dev, sk, ro->err_mask);
+			if (err)
+				isobus_disable_filters(dev, sk, ro->filter, ro->count);
+		}
 	}
 
 	return err;
 }
 
-static int pdu_notifier(struct notifier_block *nb,
+static int isobus_notifier(struct notifier_block *nb,
 			unsigned long msg, void *data)
 {
 	struct net_device *dev = (struct net_device *)data;
-	struct pdu_sock *ro = container_of(nb, struct pdu_sock, notifier);
+	struct isobus_sock *ro = container_of(nb, struct isobus_sock, notifier);
 	struct sock *sk = &ro->sk;
 
 	if (!net_eq(dev_net(dev), &init_net))
@@ -299,7 +584,7 @@ static int pdu_notifier(struct notifier_block *nb,
 		lock_sock(sk);
 		/* remove current filters & unregister */
 		if (ro->bound)
-			pdu_disable_allfilters(dev, sk);
+			isobus_disable_allfilters(dev, sk);
 
 		if (ro->count > 1)
 			kfree(ro->filter);
@@ -324,41 +609,15 @@ static int pdu_notifier(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
-static int pdu_init(struct sock *sk)
-{
-	struct pdu_sock *ro = pdu_sk(sk);
-
-	ro->bound            = 0;
-	ro->ifindex          = 0;
-
-	/* set default filter to single entry dfilter */
-	ro->dfilter.can_id   = 0;
-	ro->dfilter.can_mask = MASK_ALL;
-	ro->filter           = &ro->dfilter;
-	ro->count            = 1;
-
-	/* set default loopback behaviour */
-	ro->loopback         = 1;
-	ro->recv_own_msgs    = 0;
-	ro->fd_frames        = 0;
-
-	/* set notifier */
-	ro->notifier.notifier_call = pdu_notifier;
-
-	register_netdevice_notifier(&ro->notifier);
-
-	return 0;
-}
-
-static int pdu_release(struct socket *sock)
+static int isobus_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
-	struct pdu_sock *ro;
+	struct isobus_sock *ro;
 
 	if (!sk)
 		return 0;
 
-	ro = pdu_sk(sk);
+	ro = isobus_sk(sk);
 
 	unregister_netdevice_notifier(&ro->notifier);
 
@@ -371,11 +630,11 @@ static int pdu_release(struct socket *sock)
 
 			dev = dev_get_by_index(&init_net, ro->ifindex);
 			if (dev) {
-				pdu_disable_allfilters(dev, sk);
+				isobus_disable_allfilters(dev, sk);
 				dev_put(dev);
 			}
 		} else
-			pdu_disable_allfilters(NULL, sk);
+			isobus_disable_allfilters(NULL, sk);
 	}
 
 	if (ro->count > 1)
@@ -394,11 +653,314 @@ static int pdu_release(struct socket *sock)
 	return 0;
 }
 
-static int pdu_bind(struct socket *sock, struct sockaddr *uaddr, int len)
+static int isobus_getname(struct socket *sock, struct sockaddr *uaddr,
+		       int *len, int peer)
 {
 	struct sockaddr_can *addr = (struct sockaddr_can *)uaddr;
 	struct sock *sk = sock->sk;
-	struct pdu_sock *ro = pdu_sk(sk);
+	struct isobus_sock *ro = isobus_sk(sk);
+
+	if (peer)
+		return -EOPNOTSUPP;
+
+	memset(addr, 0, sizeof(*addr));
+	addr->can_family  = AF_CAN;
+	addr->can_ifindex = ro->ifindex;
+
+	*len = sizeof(*addr);
+
+	return 0;
+}
+
+static int isobus_setsockopt(struct socket *sock, int level, int optname,
+			  char __user *optval, unsigned int optlen)
+{
+	struct sock *sk = sock->sk;
+	struct isobus_sock *ro = isobus_sk(sk);
+	struct can_filter *filter = NULL;  /* dyn. alloc'ed filters */
+	struct can_filter sfilter;         /* single filter */
+	struct net_device *dev = NULL;
+	can_err_mask_t err_mask = 0;
+	int count = 0;
+	int err = 0;
+
+	if (level != SOL_CAN_ISOBUS)
+		return -EINVAL;
+
+	switch (optname) {
+
+	case CAN_ISOBUS_FILTER:
+		if (optlen % sizeof(struct can_filter) != 0)
+			return -EINVAL;
+
+		count = optlen / sizeof(struct can_filter);
+
+		if (count > 1) {
+			/* filter does not fit into dfilter => alloc space */
+			filter = memdup_user(optval, optlen);
+			if (IS_ERR(filter))
+				return PTR_ERR(filter);
+		} else if (count == 1) {
+			if (copy_from_user(&sfilter, optval, sizeof(sfilter)))
+				return -EFAULT;
+		}
+
+		lock_sock(sk);
+
+		if (ro->bound && ro->ifindex)
+			dev = dev_get_by_index(&init_net, ro->ifindex);
+
+		if (ro->bound) {
+			/* (try to) register the new filters */
+			if (count == 1)
+				err = isobus_enable_filters(dev, sk, &sfilter, 1);
+			else
+				err = isobus_enable_filters(dev, sk, filter,
+							 count);
+			if (err) {
+				if (count > 1)
+					kfree(filter);
+				goto out_fil;
+			}
+
+			/* remove old filter registrations */
+			isobus_disable_filters(dev, sk, ro->filter, ro->count);
+		}
+
+		/* remove old filter space */
+		if (ro->count > 1)
+			kfree(ro->filter);
+
+		/* link new filters to the socket */
+		if (count == 1) {
+			/* copy filter data for single filter */
+			ro->dfilter = sfilter;
+			filter = &ro->dfilter;
+		}
+		ro->filter = filter;
+		ro->count  = count;
+
+ out_fil:
+		if (dev)
+			dev_put(dev);
+
+		release_sock(sk);
+
+		break;
+
+	case CAN_ISOBUS_ERR_FILTER:
+		if (optlen != sizeof(err_mask))
+			return -EINVAL;
+
+		if (copy_from_user(&err_mask, optval, optlen))
+			return -EFAULT;
+
+		err_mask &= CAN_ERR_MASK;
+
+		lock_sock(sk);
+
+		if (ro->bound && ro->ifindex)
+			dev = dev_get_by_index(&init_net, ro->ifindex);
+
+		/* remove current error mask */
+		if (ro->bound) {
+			/* (try to) register the new err_mask */
+			err = isobus_enable_errfilter(dev, sk, err_mask);
+
+			if (err)
+				goto out_err;
+
+			/* remove old err_mask registration */
+			isobus_disable_errfilter(dev, sk, ro->err_mask);
+		}
+
+		/* link new err_mask to the socket */
+		ro->err_mask = err_mask;
+
+ out_err:
+		if (dev)
+			dev_put(dev);
+
+		release_sock(sk);
+
+		break;
+
+	case CAN_ISOBUS_LOOPBACK:
+		if (optlen != sizeof(ro->loopback))
+			return -EINVAL;
+
+		if (copy_from_user(&ro->loopback, optval, optlen))
+			return -EFAULT;
+
+		break;
+
+	case CAN_ISOBUS_RECV_OWN_MSGS:
+		if (optlen != sizeof(ro->recv_own_msgs))
+			return -EINVAL;
+
+		if (copy_from_user(&ro->recv_own_msgs, optval, optlen))
+			return -EFAULT;
+
+		break;
+
+	case CAN_ISOBUS_FD_FRAMES:
+		if (optlen != sizeof(ro->fd_frames))
+			return -EINVAL;
+
+		if (copy_from_user(&ro->fd_frames, optval, optlen))
+			return -EFAULT;
+
+		break;
+
+	default:
+		return -ENOPROTOOPT;
+	}
+	return err;
+}
+
+static int isobus_getsockopt(struct socket *sock, int level, int optname,
+			  char __user *optval, int __user *optlen)
+{
+	struct sock *sk = sock->sk;
+	struct isobus_sock *ro = isobus_sk(sk);
+	int len;
+	void *val;
+	int err = 0;
+
+	if (level != SOL_CAN_ISOBUS)
+		return -EINVAL;
+	if (get_user(len, optlen))
+		return -EFAULT;
+	if (len < 0)
+		return -EINVAL;
+
+	switch (optname) {
+
+	case CAN_ISOBUS_FILTER:
+		lock_sock(sk);
+		if (ro->count > 0) {
+			int fsize = ro->count * sizeof(struct can_filter);
+			if (len > fsize)
+				len = fsize;
+			if (copy_to_user(optval, ro->filter, len))
+				err = -EFAULT;
+		} else
+			len = 0;
+		release_sock(sk);
+
+		if (!err)
+			err = put_user(len, optlen);
+		return err;
+
+	case CAN_ISOBUS_ERR_FILTER:
+		if (len > sizeof(can_err_mask_t))
+			len = sizeof(can_err_mask_t);
+		val = &ro->err_mask;
+		break;
+
+	case CAN_ISOBUS_LOOPBACK:
+		if (len > sizeof(int))
+			len = sizeof(int);
+		val = &ro->loopback;
+		break;
+
+	case CAN_ISOBUS_RECV_OWN_MSGS:
+		if (len > sizeof(int))
+			len = sizeof(int);
+		val = &ro->recv_own_msgs;
+		break;
+
+	case CAN_ISOBUS_FD_FRAMES:
+		if (len > sizeof(int))
+			len = sizeof(int);
+		val = &ro->fd_frames;
+		break;
+
+	default:
+		return -ENOPROTOOPT;
+	}
+
+	if (put_user(len, optlen))
+		return -EFAULT;
+	if (copy_to_user(optval, val, len))
+		return -EFAULT;
+	return 0;
+}
+
+/* Genereates a random transmit delay (in ns) */
+static inline unsigned long isobus_rtxd(void)
+{
+	unsigned long l;
+
+	get_random_bytes(&l, 1);
+
+	return l * 600000;
+}
+
+/* Called when userland reads from socket */
+static int isobus_recvmsg(struct kiocb *iocb, struct socket *sock,
+		       struct msghdr *msg, size_t size, int flags)
+{
+	struct sock *sk = sock->sk;
+	struct isobus_sock *ro = isobus_sk(sk);
+	struct sk_buff *skb;
+	int rxmtu;
+	int err = 0;
+	int noblock;
+
+	noblock =  flags & MSG_DONTWAIT;
+	flags   &= ~MSG_DONTWAIT;
+
+	skb = skb_recv_datagram(sk, flags, noblock, &err);
+	if (!skb) {
+		return err;
+	}
+
+	/*
+	 * when serving a legacy socket the DLC <= 8 is already checked inside
+	 * isobus_rcv(). Now check if we need to pass a canfd_frame to a legacy
+	 * socket and cut the possible CANFD_MTU/CAN_MTU length to CAN_MTU
+	 */
+	if (!ro->fd_frames)
+		rxmtu = CAN_MTU;
+	else
+		rxmtu = skb->len;
+
+	if (size < rxmtu)
+		msg->msg_flags |= MSG_TRUNC;
+	else
+		size = rxmtu;
+
+	err = memcpy_toiovec(msg->msg_iov, skb->data, size);
+	if (err < 0) {
+		skb_free_datagram(sk, skb);
+		return err;
+	}
+
+	sock_recv_ts_and_drops(msg, sk, skb);
+
+	/* Create ancillary header with the source CAN address */
+	put_cmsg(msg, SOL_CAN_ISOBUS,  CAN_ISOBUS_SADDR,
+			sizeof(struct sockaddr_can), skb->cb);
+ 
+	if (msg->msg_name) {
+		msg->msg_namelen = sizeof(struct sockaddr_can);
+		memcpy(msg->msg_name, skb->cb, msg->msg_namelen);
+	}
+
+	/* assign the flags that have been recorded in isobus_rcv() */
+	msg->msg_flags |= *(isobus_flags(skb));
+
+	skb_free_datagram(sk, skb);
+
+	return size;
+}
+
+static int isobus_bind(struct socket *sock, struct sockaddr *uaddr, int len)
+{
+	struct sockaddr_can *addr = (struct sockaddr_can *)uaddr;
+	struct sock *sk = sock->sk;
+	struct isobus_sock *ro = isobus_sk(sk);
 	int ifindex;
 	int err = 0;
 	int notify_enetdown = 0;
@@ -430,13 +992,13 @@ static int pdu_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 		ifindex = dev->ifindex;
 
 		/* filters set by default/setsockopt */
-		err = pdu_enable_allfilters(dev, sk);
+		err = isobus_enable_allfilters(dev, sk);
 		dev_put(dev);
 	} else {
 		ifindex = 0;
 
 		/* filters set by default/setsockopt */
-		err = pdu_enable_allfilters(NULL, sk);
+		err = isobus_enable_allfilters(NULL, sk);
 	}
 
 	if (!err) {
@@ -447,11 +1009,11 @@ static int pdu_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 
 				dev = dev_get_by_index(&init_net, ro->ifindex);
 				if (dev) {
-					pdu_disable_allfilters(dev, sk);
+					isobus_disable_allfilters(dev, sk);
 					dev_put(dev);
 				}
 			} else
-				pdu_disable_allfilters(NULL, sk);
+				isobus_disable_allfilters(NULL, sk);
 		}
 		ro->ifindex = ifindex;
 		ro->bound = 1;
@@ -459,6 +1021,27 @@ static int pdu_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 
  out:
 	release_sock(sk);
+
+	ro->pref_addr = addr->can_addr.isobus.addr;
+	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+	/* Send request for address claimed message */
+	isobus_send(ro, (struct isobus_mesg *)&req_addr_claimed_mesg,
+			CAN_ISOBUS_GLOBAL_ADDR);
+
+	/* Set timer to give ECUs time to respond with addresses */
+	hrtimer_start(&ro->timer,
+			ktime_set(0, CAN_ISOBUS_ADDR_CLAIM_TIMEOUT + isobus_rtxd()),
+			HRTIMER_MODE_REL);
+	/* TODO: Add 250ms delay after address claim and before transmit */
+
+	/* Block until socket is bound */
+	ro->state = ISOBUS_WAIT_ADDR;
+	wait_event_interruptible(ro->wait, ro->state != ISOBUS_WAIT_ADDR);
+
+	/* Check if we were able to get an address */
+	if(ro->state != ISOBUS_HAVE_ADDR) {
+		err = -EADDRINUSE;
+	}
 
 	if (notify_enetdown) {
 		sk->sk_err = ENETDOWN;
@@ -469,415 +1052,125 @@ static int pdu_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 	return err;
 }
 
-static int pdu_getname(struct socket *sock, struct sockaddr *uaddr,
-		       int *len, int peer)
+/* Called when the timer to wait for address claimed messages goes off */
+static enum hrtimer_restart isobus_timer_handler(struct hrtimer *hrtimer)
 {
-	struct sockaddr_can *addr = (struct sockaddr_can *)uaddr;
-	struct sock *sk = sock->sk;
-	struct pdu_sock *ro = pdu_sk(sk);
+    struct isobus_sock *so = container_of(hrtimer, struct isobus_sock,
+                         timer);
+    tasklet_schedule(&so->tsklet);
 
-	if (peer)
-		return -EOPNOTSUPP;
+    return HRTIMER_NORESTART;
+}
 
-	memset(addr, 0, sizeof(*addr));
-	addr->can_family  = AF_CAN;
-	addr->can_ifindex = ro->ifindex;
+/* Called when it is time to claim an address */
+static void isobus_timer_tasklet(unsigned long data)
+{
+	struct isobus_sock *ro;
 
-	*len = sizeof(*addr);
+	ro = (struct isobus_sock *)data;
+
+	/* Send address claimed message */
+	ro->s_addr = ro->pref_addr;
+	isobus_send(ro, (struct isobus_mesg *)&addr_claimed_mesg,
+			CAN_ISOBUS_GLOBAL_ADDR);
+
+	/* Tell socket it is now bound to an address */
+	ro->state = ISOBUS_HAVE_ADDR;
+	wake_up_interruptible(&ro->wait);
+}
+
+static int isobus_init(struct sock *sk)
+{
+	struct isobus_sock *ro = isobus_sk(sk);
+
+	ro->bound            = 0;
+	ro->ifindex          = 0;
+
+	/* set default filter to single entry dfilter */
+	ro->dfilter.can_id   = 0;
+	ro->dfilter.can_mask = MASK_ALL;
+	ro->filter           = &ro->dfilter;
+	ro->count            = 1;
+
+	/* set default loopback behaviour */
+	ro->loopback         = 1;
+	ro->recv_own_msgs    = 0;
+	ro->fd_frames        = 0;
+
+	/* Set default address */
+	ro->pref_addr = CAN_ISOBUS_NULL_ADDR;
+	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+
+	/* Set default state */
+	ro->state = ISOBUS_IDLE;
+
+	/* Timer stuff */
+	hrtimer_init(&ro->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	ro->timer.function = isobus_timer_handler;
+	tasklet_init(&ro->tsklet, isobus_timer_tasklet, (unsigned long)ro);
+
+	init_waitqueue_head(&ro->wait);
+
+	/* set notifier */
+	ro->notifier.notifier_call = isobus_notifier;
+
+	register_netdevice_notifier(&ro->notifier);
 
 	return 0;
 }
 
-static int pdu_setsockopt(struct socket *sock, int level, int optname,
-			  char __user *optval, unsigned int optlen)
-{
-	struct sock *sk = sock->sk;
-	struct pdu_sock *ro = pdu_sk(sk);
-	struct can_filter *filter = NULL;  /* dyn. alloc'ed filters */
-	struct can_filter sfilter;         /* single filter */
-	struct net_device *dev = NULL;
-	can_err_mask_t err_mask = 0;
-	int count = 0;
-	int err = 0;
-
-	if (level != SOL_CAN_PDU)
-		return -EINVAL;
-
-	switch (optname) {
-
-	case CAN_PDU_FILTER:
-		if (optlen % sizeof(struct can_filter) != 0)
-			return -EINVAL;
-
-		count = optlen / sizeof(struct can_filter);
-
-		if (count > 1) {
-			/* filter does not fit into dfilter => alloc space */
-			filter = memdup_user(optval, optlen);
-			if (IS_ERR(filter))
-				return PTR_ERR(filter);
-		} else if (count == 1) {
-			if (copy_from_user(&sfilter, optval, sizeof(sfilter)))
-				return -EFAULT;
-		}
-
-		lock_sock(sk);
-
-		if (ro->bound && ro->ifindex)
-			dev = dev_get_by_index(&init_net, ro->ifindex);
-
-		if (ro->bound) {
-			/* (try to) register the new filters */
-			if (count == 1)
-				err = pdu_enable_filters(dev, sk, &sfilter, 1);
-			else
-				err = pdu_enable_filters(dev, sk, filter,
-							 count);
-			if (err) {
-				if (count > 1)
-					kfree(filter);
-				goto out_fil;
-			}
-
-			/* remove old filter registrations */
-			pdu_disable_filters(dev, sk, ro->filter, ro->count);
-		}
-
-		/* remove old filter space */
-		if (ro->count > 1)
-			kfree(ro->filter);
-
-		/* link new filters to the socket */
-		if (count == 1) {
-			/* copy filter data for single filter */
-			ro->dfilter = sfilter;
-			filter = &ro->dfilter;
-		}
-		ro->filter = filter;
-		ro->count  = count;
-
- out_fil:
-		if (dev)
-			dev_put(dev);
-
-		release_sock(sk);
-
-		break;
-
-	case CAN_PDU_ERR_FILTER:
-		if (optlen != sizeof(err_mask))
-			return -EINVAL;
-
-		if (copy_from_user(&err_mask, optval, optlen))
-			return -EFAULT;
-
-		err_mask &= CAN_ERR_MASK;
-
-		lock_sock(sk);
-
-		if (ro->bound && ro->ifindex)
-			dev = dev_get_by_index(&init_net, ro->ifindex);
-
-		/* remove current error mask */
-		if (ro->bound) {
-			/* (try to) register the new err_mask */
-			err = pdu_enable_errfilter(dev, sk, err_mask);
-
-			if (err)
-				goto out_err;
-
-			/* remove old err_mask registration */
-			pdu_disable_errfilter(dev, sk, ro->err_mask);
-		}
-
-		/* link new err_mask to the socket */
-		ro->err_mask = err_mask;
-
- out_err:
-		if (dev)
-			dev_put(dev);
-
-		release_sock(sk);
-
-		break;
-
-	case CAN_PDU_LOOPBACK:
-		if (optlen != sizeof(ro->loopback))
-			return -EINVAL;
-
-		if (copy_from_user(&ro->loopback, optval, optlen))
-			return -EFAULT;
-
-		break;
-
-	case CAN_PDU_RECV_OWN_MSGS:
-		if (optlen != sizeof(ro->recv_own_msgs))
-			return -EINVAL;
-
-		if (copy_from_user(&ro->recv_own_msgs, optval, optlen))
-			return -EFAULT;
-
-		break;
-
-	case CAN_PDU_FD_FRAMES:
-		if (optlen != sizeof(ro->fd_frames))
-			return -EINVAL;
-
-		if (copy_from_user(&ro->fd_frames, optval, optlen))
-			return -EFAULT;
-
-		break;
-
-	default:
-		return -ENOPROTOOPT;
-	}
-	return err;
-}
-
-static int pdu_getsockopt(struct socket *sock, int level, int optname,
-			  char __user *optval, int __user *optlen)
-{
-	struct sock *sk = sock->sk;
-	struct pdu_sock *ro = pdu_sk(sk);
-	int len;
-	void *val;
-	int err = 0;
-
-	if (level != SOL_CAN_PDU)
-		return -EINVAL;
-	if (get_user(len, optlen))
-		return -EFAULT;
-	if (len < 0)
-		return -EINVAL;
-
-	switch (optname) {
-
-	case CAN_PDU_FILTER:
-		lock_sock(sk);
-		if (ro->count > 0) {
-			int fsize = ro->count * sizeof(struct can_filter);
-			if (len > fsize)
-				len = fsize;
-			if (copy_to_user(optval, ro->filter, len))
-				err = -EFAULT;
-		} else
-			len = 0;
-		release_sock(sk);
-
-		if (!err)
-			err = put_user(len, optlen);
-		return err;
-
-	case CAN_PDU_ERR_FILTER:
-		if (len > sizeof(can_err_mask_t))
-			len = sizeof(can_err_mask_t);
-		val = &ro->err_mask;
-		break;
-
-	case CAN_PDU_LOOPBACK:
-		if (len > sizeof(int))
-			len = sizeof(int);
-		val = &ro->loopback;
-		break;
-
-	case CAN_PDU_RECV_OWN_MSGS:
-		if (len > sizeof(int))
-			len = sizeof(int);
-		val = &ro->recv_own_msgs;
-		break;
-
-	case CAN_PDU_FD_FRAMES:
-		if (len > sizeof(int))
-			len = sizeof(int);
-		val = &ro->fd_frames;
-		break;
-
-	default:
-		return -ENOPROTOOPT;
-	}
-
-	if (put_user(len, optlen))
-		return -EFAULT;
-	if (copy_to_user(optval, val, len))
-		return -EFAULT;
-	return 0;
-}
-
-static int pdu_sendmsg(struct kiocb *iocb, struct socket *sock,
-		       struct msghdr *msg, size_t size)
-{
-	struct sock *sk = sock->sk;
-	struct pdu_sock *ro = pdu_sk(sk);
-	struct sk_buff *skb;
-	struct net_device *dev;
-	int ifindex;
-	int err;
-
-	if (msg->msg_name) {
-		struct sockaddr_can *addr =
-			(struct sockaddr_can *)msg->msg_name;
-
-		if (msg->msg_namelen < sizeof(*addr))
-			return -EINVAL;
-
-		if (addr->can_family != AF_CAN)
-			return -EINVAL;
-
-		ifindex = addr->can_ifindex;
-	} else
-		ifindex = ro->ifindex;
-
-	if (ro->fd_frames) {
-		if (unlikely(size != CANFD_MTU && size != CAN_MTU))
-			return -EINVAL;
-	} else {
-		if (unlikely(size != CAN_MTU))
-			return -EINVAL;
-	}
-
-	dev = dev_get_by_index(&init_net, ifindex);
-	if (!dev)
-		return -ENXIO;
-
-	skb = sock_alloc_send_skb(sk, size, msg->msg_flags & MSG_DONTWAIT,
-				  &err);
-	if (!skb)
-		goto put_dev;
-
-	err = memcpy_fromiovec(skb_put(skb, size), msg->msg_iov, size);
-	if (err < 0)
-		goto free_skb;
-	err = sock_tx_timestamp(sk, &skb_shinfo(skb)->tx_flags);
-	if (err < 0)
-		goto free_skb;
-
-	skb->dev = dev;
-	skb->sk  = sk;
-
-	err = can_send(skb, ro->loopback);
-
-	dev_put(dev);
-
-	if (err)
-		goto send_failed;
-
-	return size;
-
-free_skb:
-	kfree_skb(skb);
-put_dev:
-	dev_put(dev);
-send_failed:
-	return err;
-}
-
-/* Called when userland reads from socket */
-static int pdu_recvmsg(struct kiocb *iocb, struct socket *sock,
-		       struct msghdr *msg, size_t size, int flags)
-{
-	struct sock *sk = sock->sk;
-	struct pdu_sock *ro = pdu_sk(sk);
-	struct sk_buff *skb;
-	int rxmtu;
-	int err = 0;
-	int noblock;
-
-	noblock =  flags & MSG_DONTWAIT;
-	flags   &= ~MSG_DONTWAIT;
-
-	skb = skb_recv_datagram(sk, flags, noblock, &err);
-	if (!skb) {
-		return err;
-	}
-
-	/*
-	 * when serving a legacy socket the DLC <= 8 is already checked inside
-	 * pdu_rcv(). Now check if we need to pass a canfd_frame to a legacy
-	 * socket and cut the possible CANFD_MTU/CAN_MTU length to CAN_MTU
-	 */
-	if (!ro->fd_frames)
-		rxmtu = CAN_MTU;
-	else
-		rxmtu = skb->len;
-
-	if (size < rxmtu)
-		msg->msg_flags |= MSG_TRUNC;
-	else
-		size = rxmtu;
-
-	err = memcpy_toiovec(msg->msg_iov, skb->data, size);
-	if (err < 0) {
-		skb_free_datagram(sk, skb);
-		return err;
-	}
-
-	sock_recv_ts_and_drops(msg, sk, skb);
-
-	if (msg->msg_name) {
-		msg->msg_namelen = sizeof(struct sockaddr_can);
-		memcpy(msg->msg_name, skb->cb, msg->msg_namelen);
-	}
-
-	/* assign the flags that have been recorded in pdu_rcv() */
-	msg->msg_flags |= *(pdu_flags(skb));
-
-	skb_free_datagram(sk, skb);
-
-	return size;
-}
-
-static const struct proto_ops pdu_ops = {
+static const struct proto_ops isobus_ops = {
 	.family        = PF_CAN,
-	.release       = pdu_release,
-	.bind          = pdu_bind,
+	.release       = isobus_release,
+	.bind          = isobus_bind,
 	.connect       = sock_no_connect,
 	.socketpair    = sock_no_socketpair,
 	.accept        = sock_no_accept,
-	.getname       = pdu_getname,
+	.getname       = isobus_getname,
 	.poll          = datagram_poll,
 	.ioctl         = can_ioctl,	/* use can_ioctl() from af_can.c */
 	.listen        = sock_no_listen,
 	.shutdown      = sock_no_shutdown,
-	.setsockopt    = pdu_setsockopt,
-	.getsockopt    = pdu_getsockopt,
-	.sendmsg       = pdu_sendmsg,
-	.recvmsg       = pdu_recvmsg,
+	.setsockopt    = isobus_setsockopt,
+	.getsockopt    = isobus_getsockopt,
+	.sendmsg       = isobus_sendmsg,
+	.recvmsg       = isobus_recvmsg,
 	.mmap          = sock_no_mmap,
 	.sendpage      = sock_no_sendpage,
 };
 
-static struct proto pdu_proto __read_mostly = {
-	.name       = "CAN_PDU",
+static struct proto isobus_proto __read_mostly = {
+	.name       = "CAN_ISOBUS",
 	.owner      = THIS_MODULE,
-	.obj_size   = sizeof(struct pdu_sock),
-	.init       = pdu_init,
+	.obj_size   = sizeof(struct isobus_sock),
+	.init       = isobus_init,
 };
 
-static const struct can_proto pdu_can_proto = {
+static const struct can_proto isobus_can_proto = {
 	.type       = SOCK_RAW,
-	.protocol   = CAN_PDU,
-	.ops        = &pdu_ops,
-	.prot       = &pdu_proto,
+	.protocol   = CAN_ISOBUS,
+	.ops        = &isobus_ops,
+	.prot       = &isobus_proto,
 };
 
-static __init int pdu_module_init(void)
+static __init int isobus_module_init(void)
 {
 	int err;
 
 	printk(banner);
 
-	err = can_proto_register(&pdu_can_proto);
+	err = can_proto_register(&isobus_can_proto);
 	if (err < 0)
-		printk(KERN_ERR "can: registration of pdu protocol failed\n");
+		printk(KERN_ERR "can: registration of isobus protocol failed\n");
 
 	return err;
 }
 
-static __exit void pdu_module_exit(void)
+static __exit void isobus_module_exit(void)
 {
-	can_proto_unregister(&pdu_can_proto);
+	can_proto_unregister(&isobus_can_proto);
 }
 
-module_init(pdu_module_init);
-module_exit(pdu_module_exit);
+module_init(isobus_module_init);
+module_exit(isobus_module_exit);
 
