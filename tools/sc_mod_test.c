@@ -9,7 +9,7 @@
 #include <sys/ioctl.h>
  
 #include "../socketcan-isobus/patched/can.h"
-#include "../socketcan-isobus/pdu.h"
+#include "../socketcan-isobus/isobus.h"
  
 int main(int argc, char *argv[]) {
 	int s;
@@ -17,16 +17,13 @@ int main(int argc, char *argv[]) {
 	struct sockaddr_can addr;
 	struct ifreq ifr;
 	int i;
-	struct pdu p;
 	struct msghdr msg;
 	struct iovec iov;
 
 	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval))+CMSG_SPACE(sizeof(__u32))];
+	struct isobus_mesg mesg;
 
-	struct can_filter filter;
-	__u32 pgn;
-
-	if((s = socket(PF_CAN, SOCK_RAW, CAN_PDU)) < 0) {
+	if((s = socket(PF_CAN, SOCK_RAW, CAN_ISOBUS)) < 0) {
 		perror("Error while opening socket");
 		return -1;
 	}
@@ -37,21 +34,7 @@ int main(int argc, char *argv[]) {
 
 	addr.can_family  = AF_CAN;
 	addr.can_ifindex = ifr.ifr_ifindex; 
-
-	if(argc > 2) {
-		/* Only receive a certain PGN */
-		sscanf(argv[2], "%d", &pgn);
-		filter.can_id = (0x3ffff & pgn) << 8;
-		/* Some PGNs include the PS field and some don't */
-		if(pgn <= 0xef00) {
-			/* PDU1, don't include PS in PGN */
-			filter.can_mask = 0x3ff00 << 8;
-		} else {
-			/* PDU2, do include PS in PGN */
-			filter.can_mask = 0x3ffff << 8;
-		}
-		setsockopt(s, SOL_CAN_PDU, CAN_PDU_FILTER, &filter, sizeof(filter));
-	}
+	sscanf(argv[2], "%2x", &addr.can_addr.isobus.addr);
 
 	if(bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		perror("Error in socket bind");
@@ -63,9 +46,21 @@ int main(int argc, char *argv[]) {
 	msg.msg_control = &ctrlmsg;
 	msg.msg_controllen = sizeof(ctrlmsg);
 	msg.msg_iovlen = 1;
-	iov.iov_base = &p;
-	iov.iov_len = sizeof(p);
+	iov.iov_base = &mesg;
+	iov.iov_len = sizeof(mesg);
 
+	mesg.pgn = ISOBUS_PGN_REQUEST;
+	mesg.dlen = 1;
+	mesg.data[0] = 0xAA;
+
+	/* Send an ISOBUS message */
+	if(sendto(s, &mesg, sizeof(mesg), 0, (struct sockaddr *)&addr,
+				sizeof(addr)) < 0) {
+		perror("Error sending");
+		return -3;
+	}
+
+	/* Listen for ISOBUS messages */
 	while(1)
 	{
 		nbytes = recvmsg(s, &msg, 0);
@@ -75,16 +70,9 @@ int main(int argc, char *argv[]) {
 			return -1;
 		}
 
-		printf("pri:%1x edp:%1x dp:%1x pf:%02x ps:%02x sa:%02x len:%1x data:",
-			p.priority,
-			p.extended_data_page,
-			p.data_page,
-			p.format,
-			p.specific,
-			p.source_address,
-			p.data_len);
-		for(i = 0; i < p.data_len; i++)
-			printf("%02x", p.data[i]);
+		printf("PGN:%6d data:", mesg.pgn);
+		for(i = 0; i < mesg.dlen; i++)
+			printf("%02x", mesg.data[i]);
 		printf("\n");
 		fflush(0);
 	}
