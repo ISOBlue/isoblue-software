@@ -23,9 +23,10 @@ fi
 
 # Construct cansend commands from the contents of the remaining arguments
 tail -q -n +2 $@ | \
+	cut -d "	" -f1 | \
 	sed "s/ \+$//;
 		s/ \[.\] //;
-		s/ /$bs/g
+		s/ /$bs/g;
 		s/^<0x\([0-9 a-f]\+\)>/$can_send $sid\1$eid/;" | \
 	sh - > /dev/null
 
