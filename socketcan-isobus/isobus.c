@@ -43,6 +43,7 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/hrtimer.h>
+#include <linux/wait.h>
 #include <linux/uio.h>
 #include <linux/net.h>
 #include <linux/slab.h>
@@ -69,6 +70,13 @@ MODULE_ALIAS("can-proto-8");
 
 #define MASK_ALL 0
 
+#define ISOBUS_MIN_SC_ADDR	128U
+#define ISOBUS_MAX_SC_ADDR	247U
+
+/* Timeouts etc. (100's on ns) */
+#define ISOBUS_ADDR_CLAIM_TIMEOUT	2500L
+#define ISOBUS_RTXD_MULTIPLIER	6L
+
 /*
  * A isobus socket has a list of can_filters attached to it, each receiving
  * the CAN frames matching that filter.  If the filter list is empty,
@@ -93,17 +101,18 @@ struct isobus_sock {
 
 	__u8 pref_addr;
 	__u8 s_addr;
-	struct isobus_name name;
+	name_t name;
 	enum {
 		ISOBUS_IDLE = 0,
 		ISOBUS_WAIT_ADDR,
-		ISOBUS_WAIT_ADDR_CLAIM,
+		ISOBUS_WAIT_HAVE_ADDR,
 		ISOBUS_HAVE_ADDR,
 		ISOBUS_LOST_ADDR
 	} state;
-	struct hrtimer timer;
-	struct tasklet_struct tsklet;
 	wait_queue_head_t wait;
+
+	bool sc_addrs[ISOBUS_MAX_SC_ADDR - ISOBUS_MIN_SC_ADDR + 1];
+	bool pref_avail;
 };
 
 /* Netowrk management messages */
@@ -114,7 +123,7 @@ static const struct isobus_mesg req_addr_claimed_mesg = {
 		(ISOBUS_PGN_ADDR_CLAIMED >> 8) & 0xFF,
 		ISOBUS_PGN_ADDR_CLAIMED & 0xFF},
 };
-static struct isobus_mesg addr_claimed_mesg = {
+static const struct isobus_mesg addr_claimed_mesg = {
 	ISOBUS_PGN_ADDR_CLAIMED,
 	8,
 	{0, 0, 0, 0, 0, 0, 0, 0},
@@ -137,6 +146,17 @@ static inline unsigned int *isobus_flags(struct sk_buff *skb)
 static inline struct isobus_sock *isobus_sk(const struct sock *sk)
 {
 	return (struct isobus_sock *)sk;
+}
+
+/* Genereates a random transmit delay (in 100's of ns) */
+static inline long isobus_rtxd(void)
+{
+	long l;
+
+	l = 0;
+	get_random_bytes(&l, 1);
+
+	return l * ISOBUS_RTXD_MULTIPLIER;
 }
 
 /* Macros for accessing the fields that make up a PGN */
@@ -181,13 +201,13 @@ static void isobus_rcv(struct sk_buff *oskb, void *data)
 	struct can_frame *cf;
 	struct isobus_mesg *mesg;
 
-	/* set pointer to received CAN frame */
-	cf = (struct can_frame *) oskb->data;
-
 	/* check the received tx sock reference */
 	if (!ro->recv_own_msgs && oskb->sk == sk) {
 		return;
 	}
+
+	/* set pointer to received CAN frame */
+	cf = (struct can_frame *) oskb->data;
 
 	/* do not pass frames with DLC > 8 to a legacy socket */
 	if (!ro->fd_frames) {
@@ -206,14 +226,14 @@ static void isobus_rcv(struct sk_buff *oskb, void *data)
 			 * but have a different format for the CAN identifier.
 			 * TODO: Tell SocketCAN to filter these frames out for this module.
 			 */
-			printk(KERN_NOTICE "ISO 15765-3 PGN encountered\n");
+			printk(KERN_NOTICE "can_isobus: ISO 15765-3 PGN encountered\n");
 		} else {
 			/* 
 			 * Check for ISO 11783 reserved PGNs which do not yet have a
 			 * defined stucture, so nothing can be done with them yet.
 			 * TODO: Tell SocketCAN to filter these frames out for this module.
 			 */
-			printk(KERN_NOTICE "ISO 11783 reserved PGN encountered\n");
+			printk(KERN_NOTICE "can_isobus: ISO 11783 reserved PGN encountered\n");
 		}
 		return;
 	}
@@ -277,6 +297,10 @@ static int isobus_sendmsg(struct kiocb *iocb, struct socket *sock,
 	struct can_frame *cf;
 	__u8 da;
 
+	/* Check for being kicked off the bus */
+	if(ro->state != ISOBUS_HAVE_ADDR)
+		return -EADDRINUSE;
+
 	/* Find pointer to ISOBUS message to be sent */
 	mesg = (struct isobus_mesg *)msg->msg_iov->iov_base;
 
@@ -300,12 +324,12 @@ static int isobus_sendmsg(struct kiocb *iocb, struct socket *sock,
 
 		if (!ro->ifindex) {
 			if (msg->msg_namelen < sizeof(*addr)) {
-				printk(KERN_DEBUG "Address was the wrong size");
+				printk(KERN_ERR "can_isobus: address wrong size\n");
 				return -EINVAL;
 			}
 
 			if (addr->can_family != AF_CAN) {
-				printk(KERN_DEBUG "Address was not from CAN address family");
+				printk(KERN_ERR "can_isobus: address not CAN address family\n");
 				return -EINVAL;
 			}
 
@@ -313,7 +337,7 @@ static int isobus_sendmsg(struct kiocb *iocb, struct socket *sock,
 		}
 	} else if(PGN_PDU_FMT(mesg->pgn) == 1) {
 		/* PDU 1 format needs a DA */
-		printk(KERN_DEBUG "No address given for PDU 1 PGN");
+		printk(KERN_ERR "can_isobus: no address given for PDU 1 PGN\n");
 		return -EINVAL;
 	}
 
@@ -347,9 +371,7 @@ static int isobus_sendmsg(struct kiocb *iocb, struct socket *sock,
 	cf->can_id = (1 << 31) | ((mesg->pgn | da) << 8) | ro->s_addr;
 	memcpy(cf->data, mesg->data, cf->can_dlc = mesg->dlen);
 
-	err = sock_tx_timestamp(sk, &skb_shinfo(skb)->tx_flags);
-	if (err < 0)
-		goto free_skb;
+	sock_tx_timestamp(sk, &skb_shinfo(skb)->tx_flags);
 
 	skb->dev = dev;
 	skb->sk  = sk;
@@ -372,54 +394,111 @@ send_failed:
 
 /* 
  * Send an ISOBUS message (for use within this module)
- *
- * Rather gross thing that just warps the sendmsg call meant for userland,
- * will rewrite if there is ever time...
  */
 static int isobus_send(struct isobus_sock *ro, struct isobus_mesg *mesg,
 		__u8 addr)
 {
-	struct sockaddr_can s_addr;
-	struct msghdr msg;
-	struct iovec iov;
-	struct socket sock;
+	int err;
+	struct net_device *dev;
+	struct sk_buff *skb;
+	struct can_frame *cf;
 
-	s_addr.can_family = PF_CAN;
-	s_addr.can_ifindex = 0;
-	s_addr.can_addr.isobus.addr = addr;
-	msg.msg_name = &s_addr;
-	msg.msg_namelen = sizeof(s_addr);
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	msg.msg_control = NULL;
-	msg.msg_controllen = 0;
-	msg.msg_flags = 0;
-	iov.iov_base = mesg;
-	iov.iov_len = sizeof(*mesg);
-	sock.sk = (struct sock *)ro;
+	dev = dev_get_by_index(&init_net, ro->ifindex);
+	if (!dev)
+		return -ENXIO;
 
-	return isobus_sendmsg(NULL, &sock, &msg, sizeof(*mesg)); 
+	skb = alloc_skb(sizeof(struct can_frame), gfp_any());
+	if(!skb) {
+		goto put_dev;
+	}
+
+	skb->dev = dev_get_by_index(&init_net, ro->ifindex);
+	if(!skb->dev) {
+		goto free_skb;
+	}
+
+	skb->sk = &ro->sk;
+
+	cf = (struct can_frame *)skb_put(skb, sizeof(*cf));
+	if(!cf) {
+		goto free_skb;
+	}
+
+	/* Fill out CAN frame with ISOBUS message */
+	/* TODO: Implement priority */
+	cf->can_id = (1 << 31) | ((mesg->pgn | addr) << 8) | ro->s_addr;
+	memcpy(cf->data, mesg->data, cf->can_dlc = mesg->dlen);
+
+	err = can_send(skb, 1);
+
+	dev_put(dev);
+
+	return err;
+
+free_skb:
+	kfree_skb(skb);
+put_dev:
+	dev_put(dev);
+	return -1;
 }
 
+/* TODO: Check if this is really portable */
+#define DATA2NAME(data)	le64_to_cpup((uint64_t *) data)
+#define NAME2DATA(name)	cpu_to_le64((uint64_t) name)
+
 /* Function for network management to process address claimed messages */
-/* TODO: Implement getting an address without a preferred one */
-/* TODO: Implement getting an address without when someone else claims yours */
 static void isobus_addr_claimed_handler(struct sk_buff *skb, void *data)
 {
 	struct sock *sk = (struct sock *)data;
 	struct isobus_sock *ro = isobus_sk(sk);
 	struct can_frame *cf;
+	__u8 sa;
+
+	/* check the received tx sock reference */
+	if (skb->sk == sk) {
+		return;
+	}
+
+	printk(KERN_DEBUG "can_isobus: address claimed seen\n");
 
 	/* set pointer to received CAN frame */
 	cf = (struct can_frame *) skb->data;
 
-	/* Check if claimed address is my preferred one */
-	/* TODO: Add NAME comparison to see if I can have address anyway */
-	if(CANID_SA(cf->can_id) == ro->pref_addr) {
-		ro->s_addr = CAN_ISOBUS_NULL_ADDR;
-		ro->state = ISOBUS_LOST_ADDR;
-		wake_up_interruptible(&ro->wait);
+	/* Get source address of message */
+	sa = CANID_SA(cf->can_id);
+
+	/* Record occupied addresses in the self-configurable range */
+	if(sa <= ISOBUS_MAX_SC_ADDR && sa >= ISOBUS_MIN_SC_ADDR) {
+		ro->sc_addrs[sa - ISOBUS_MIN_SC_ADDR] = false;
 	}
+
+	/* Determine if address must be given up */
+	if(sa == ro->s_addr) {
+		if(ro->name <= DATA2NAME(cf->data)) {
+			isobus_send(ro, (struct isobus_mesg *)&addr_claimed_mesg,
+					CAN_ISOBUS_GLOBAL_ADDR);
+		} else {
+			goto addr_lost;
+		}
+	}
+
+	/* Determine whether or not preferred address is available */
+	if(ro->state == ISOBUS_WAIT_ADDR && sa == ro->pref_addr) {
+		if(ro->name < DATA2NAME(cf->data)) {
+			ro->state = ISOBUS_WAIT_HAVE_ADDR;
+			wake_up_interruptible(&ro->wait);
+		} else {
+			ro->pref_avail = false;
+			if(!(ro->name & CAN_ISOBUS_SC_MASK))
+				goto addr_lost;
+		}
+	}
+
+addr_lost:
+	ro->bound = 0;
+	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+	ro->state = ISOBUS_LOST_ADDR;
+	wake_up_interruptible(&ro->wait);
 }
 
 /* 
@@ -432,6 +511,12 @@ static void isobus_req_addr_claimed_handler(struct sk_buff *skb, void *data)
 	struct sock *sk = (struct sock *)data;
 	struct isobus_sock *ro = isobus_sk(sk);
 	struct can_frame *cf;
+	struct isobus_mesg mesg;
+
+	/* check the received tx sock reference */
+	if (ro->state == ISOBUS_WAIT_ADDR && skb->sk == sk) {
+		return;
+	}
 
 	/* set pointer to received CAN frame */
 	cf = (struct can_frame *) skb->data;
@@ -443,11 +528,15 @@ static void isobus_req_addr_claimed_handler(struct sk_buff *skb, void *data)
 		return;
 	}
 
-	/* Check if claimed address is my preferred one */
+	printk(KERN_DEBUG "can_isobus: request for address claimed seen\n");
+
+	/* Check if claimed address is mine */
 	/* TODO: Should this check be done with filters? */
 	if(CANID_PS(cf->can_id) == ro->s_addr ||
 			CANID_PS(cf->can_id) == CAN_ISOBUS_GLOBAL_ADDR) {
-		isobus_send(ro, &addr_claimed_mesg, CAN_ISOBUS_GLOBAL_ADDR);
+		mesg = addr_claimed_mesg;
+		*mesg.data = NAME2DATA(ro->name);
+		isobus_send(ro, &mesg, CAN_ISOBUS_GLOBAL_ADDR);
 	}
 }
 
@@ -486,19 +575,24 @@ static int isobus_enable_errfilter(struct net_device *dev, struct sock *sk,
 	return err;
 }
 
-/* Register a filter for network management PGNs */
+/* Register filters for network management PGNs */
 static int isobus_enable_nmfilters(struct net_device *dev, struct sock *sk)
 {
 	int err;
 
-	err = can_rx_register(dev, ISOBUS_PGN_ADDR_CLAIMED << 8, 
+	err = can_rx_register(dev,
+			(ISOBUS_PGN_ADDR_CLAIMED | CAN_ISOBUS_GLOBAL_ADDR) << 8, 
 			0x3FFFF << 8, isobus_addr_claimed_handler, sk, "isobus-nm");
 	if(err) {
-		can_rx_unregister(dev, ISOBUS_PGN_ADDR_CLAIMED << 8, 
+		return err;
+	}
+
+	err = can_rx_register(dev, ISOBUS_PGN_REQUEST << 8, 
+			0x3FF00 << 8, isobus_req_addr_claimed_handler, sk, "isobus-nm");
+	if(err) {
+		can_rx_unregister(dev,
+				(ISOBUS_PGN_ADDR_CLAIMED | CAN_ISOBUS_GLOBAL_ADDR) << 8, 
 				0x3FFFF << 8, isobus_addr_claimed_handler, sk);
-	} else {
-		err = can_rx_register(dev, ISOBUS_PGN_REQUEST << 8, 
-				0x3FFFF << 8, isobus_req_addr_claimed_handler, sk, "isobus-nm");
 	}
 
 	return err;
@@ -515,8 +609,7 @@ static void isobus_disable_filters(struct net_device *dev, struct sock *sk,
 }
 
 static inline void isobus_disable_errfilter(struct net_device *dev,
-					 struct sock *sk,
-					 can_err_mask_t err_mask)
+					 struct sock *sk, can_err_mask_t err_mask)
 
 {
 	if (err_mask)
@@ -528,10 +621,11 @@ static inline void isobus_disable_errfilter(struct net_device *dev,
 static inline void isobus_disable_nmfilters(struct net_device *dev,
 		struct sock *sk)
 {
-	can_rx_unregister(dev, ISOBUS_PGN_ADDR_CLAIMED << 8, 
+	can_rx_unregister(dev,
+			(ISOBUS_PGN_ADDR_CLAIMED | CAN_ISOBUS_GLOBAL_ADDR) << 8, 
 			0x3FFFF << 8, isobus_addr_claimed_handler, sk);
 	can_rx_unregister(dev, ISOBUS_PGN_REQUEST << 8, 
-			0x3FFFF << 8, isobus_req_addr_claimed_handler, sk);
+			0x3FF00 << 8, isobus_req_addr_claimed_handler, sk);
 }
 
 static inline void isobus_disable_allfilters(struct net_device *dev,
@@ -887,16 +981,6 @@ static int isobus_getsockopt(struct socket *sock, int level, int optname,
 	return 0;
 }
 
-/* Genereates a random transmit delay (in ns) */
-static inline unsigned long isobus_rtxd(void)
-{
-	unsigned long l;
-
-	get_random_bytes(&l, 1);
-
-	return l * 600000;
-}
-
 /* Called when userland reads from socket */
 static int isobus_recvmsg(struct kiocb *iocb, struct socket *sock,
 		       struct msghdr *msg, size_t size, int flags)
@@ -956,6 +1040,81 @@ static int isobus_recvmsg(struct kiocb *iocb, struct socket *sock,
 	return size;
 }
 
+static inline __u8 avail_sc_addr(struct isobus_sock *ro)
+{
+	int i;
+
+	for(i = 0; i < ISOBUS_MAX_SC_ADDR - ISOBUS_MIN_SC_ADDR + 1; i++) {
+		if(ro->sc_addrs[i]) {
+			return i + ISOBUS_MIN_SC_ADDR;
+		}
+	}
+
+	return CAN_ISOBUS_NULL_ADDR;
+}
+
+static inline int isobus_claim_addr(struct isobus_sock *ro)
+{
+	long wait;
+	struct isobus_mesg mesg;
+
+	mesg = addr_claimed_mesg;
+	*mesg.data = NAME2DATA(ro->name);
+	
+	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+	ro->state = ISOBUS_WAIT_ADDR;
+	memset(ro->sc_addrs, -1, sizeof(ro->sc_addrs));
+	ro->pref_avail = true;
+	/* Send request for address claimed message */
+	isobus_send(ro, (struct isobus_mesg *)&req_addr_claimed_mesg,
+			ro->pref_addr);
+	printk(KERN_DEBUG "can_isobus: request for address claimed sent\n");
+
+	/* Wait until we have tried to claim an address */
+	wait = (ISOBUS_ADDR_CLAIM_TIMEOUT + isobus_rtxd()) * HZ / 10000;
+	printk(KERN_DEBUG "can_isobus: waiting %ld jiffies (%d / sec)\n", wait, HZ);
+	wait_event_interruptible_timeout(ro->wait, ro->state != ISOBUS_WAIT_ADDR,
+			wait);
+
+	/* See if there was an address available */
+	if(ro->pref_addr != CAN_ISOBUS_ANY_ADDR && ro->pref_avail) {
+		ro->s_addr = ro->pref_addr;
+	} else if(ro->name & CAN_ISOBUS_SC_MASK) {
+		ro->s_addr = avail_sc_addr(ro);
+	}
+	if(ro->s_addr == CAN_ISOBUS_NULL_ADDR) {
+		goto err;
+	}
+
+	/* Send address claimed message */
+	isobus_send(ro, &mesg, CAN_ISOBUS_GLOBAL_ADDR);
+	printk(KERN_DEBUG "can_isobus: address claimed sent\n");
+
+	/* Set timer to give ECUs time to respond with address contentions */
+	wait = ISOBUS_ADDR_CLAIM_TIMEOUT * HZ / 10000;
+	printk(KERN_DEBUG "can_isobus: waiting %ld jiffies (%d / sec)\n", wait, HZ);
+	wait_event_interruptible_timeout(ro->wait,
+			ro->state != ISOBUS_WAIT_ADDR, wait);
+
+	/* Check if we were able to get an address */
+	if(ro->state == ISOBUS_LOST_ADDR) {
+		goto err;
+	}
+
+	ro->state = ISOBUS_HAVE_ADDR;
+	printk(KERN_DEBUG "can_isobus: ready to use address\n");
+
+	return 0;
+
+err:
+	/* Send cannout claim address message */
+	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+	isobus_send(ro, &mesg, CAN_ISOBUS_GLOBAL_ADDR);
+	printk(KERN_DEBUG "can_isobus: cannot claim address sent\n");
+
+	return -EADDRINUSE;
+}
+
 static int isobus_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 {
 	struct sockaddr_can *addr = (struct sockaddr_can *)uaddr;
@@ -995,10 +1154,9 @@ static int isobus_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 		err = isobus_enable_allfilters(dev, sk);
 		dev_put(dev);
 	} else {
-		ifindex = 0;
-
-		/* filters set by default/setsockopt */
-		err = isobus_enable_allfilters(NULL, sk);
+		/* ISOBUS needs an interface */
+		err = -ENODEV;
+		goto out;
 	}
 
 	if (!err) {
@@ -1012,8 +1170,9 @@ static int isobus_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 					isobus_disable_allfilters(dev, sk);
 					dev_put(dev);
 				}
-			} else
+			} else {
 				isobus_disable_allfilters(NULL, sk);
+			}
 		}
 		ro->ifindex = ifindex;
 		ro->bound = 1;
@@ -1022,25 +1181,9 @@ static int isobus_bind(struct socket *sock, struct sockaddr *uaddr, int len)
  out:
 	release_sock(sk);
 
-	ro->pref_addr = addr->can_addr.isobus.addr;
-	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
-	/* Send request for address claimed message */
-	isobus_send(ro, (struct isobus_mesg *)&req_addr_claimed_mesg,
-			CAN_ISOBUS_GLOBAL_ADDR);
-
-	/* Set timer to give ECUs time to respond with addresses */
-	hrtimer_start(&ro->timer,
-			ktime_set(0, CAN_ISOBUS_ADDR_CLAIM_TIMEOUT + isobus_rtxd()),
-			HRTIMER_MODE_REL);
-	/* TODO: Add 250ms delay after address claim and before transmit */
-
-	/* Block until socket is bound */
-	ro->state = ISOBUS_WAIT_ADDR;
-	wait_event_interruptible(ro->wait, ro->state != ISOBUS_WAIT_ADDR);
-
-	/* Check if we were able to get an address */
-	if(ro->state != ISOBUS_HAVE_ADDR) {
-		err = -EADDRINUSE;
+	if(!err) {
+		ro->pref_addr = addr->can_addr.isobus.addr;
+		err = isobus_claim_addr(ro);
 	}
 
 	if (notify_enetdown) {
@@ -1050,33 +1193,6 @@ static int isobus_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 	}
 
 	return err;
-}
-
-/* Called when the timer to wait for address claimed messages goes off */
-static enum hrtimer_restart isobus_timer_handler(struct hrtimer *hrtimer)
-{
-    struct isobus_sock *so = container_of(hrtimer, struct isobus_sock,
-                         timer);
-    tasklet_schedule(&so->tsklet);
-
-    return HRTIMER_NORESTART;
-}
-
-/* Called when it is time to claim an address */
-static void isobus_timer_tasklet(unsigned long data)
-{
-	struct isobus_sock *ro;
-
-	ro = (struct isobus_sock *)data;
-
-	/* Send address claimed message */
-	ro->s_addr = ro->pref_addr;
-	isobus_send(ro, (struct isobus_mesg *)&addr_claimed_mesg,
-			CAN_ISOBUS_GLOBAL_ADDR);
-
-	/* Tell socket it is now bound to an address */
-	ro->state = ISOBUS_HAVE_ADDR;
-	wake_up_interruptible(&ro->wait);
 }
 
 static int isobus_init(struct sock *sk)
@@ -1100,14 +1216,10 @@ static int isobus_init(struct sock *sk)
 	/* Set default address */
 	ro->pref_addr = CAN_ISOBUS_NULL_ADDR;
 	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+	ro->name = -1;
 
 	/* Set default state */
 	ro->state = ISOBUS_IDLE;
-
-	/* Timer stuff */
-	hrtimer_init(&ro->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	ro->timer.function = isobus_timer_handler;
-	tasklet_init(&ro->tsklet, isobus_timer_tasklet, (unsigned long)ro);
 
 	init_waitqueue_head(&ro->wait);
 
@@ -1147,7 +1259,7 @@ static struct proto isobus_proto __read_mostly = {
 };
 
 static const struct can_proto isobus_can_proto = {
-	.type       = SOCK_RAW,
+	.type       = SOCK_DGRAM,
 	.protocol   = CAN_ISOBUS,
 	.ops        = &isobus_ops,
 	.prot       = &isobus_proto,

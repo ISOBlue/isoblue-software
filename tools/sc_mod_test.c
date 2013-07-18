@@ -23,7 +23,7 @@ int main(int argc, char *argv[]) {
 	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval))+CMSG_SPACE(sizeof(__u32))];
 	struct isobus_mesg mesg;
 
-	if((s = socket(PF_CAN, SOCK_RAW, CAN_ISOBUS)) < 0) {
+	if((s = socket(PF_CAN, SOCK_DGRAM, CAN_ISOBUS)) < 0) {
 		perror("Error while opening socket");
 		return -1;
 	}

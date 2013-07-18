@@ -28,7 +28,22 @@ enum {
 	CAN_ISOBUS_FD_FRAMES,	/* allow CAN FD frames (default:off) */
 };
 
-/* Unique identifier on an ISOBUS network */
+/* 
+ * ISOBUS NAME
+ *
+ * bit 0-20	: Identity Number
+ * bit 21-31	: Manufacturer Code
+ * bit 32-34	: ECU Instance
+ * bit 35-39	: Function Instance
+ * bit 40-47	: Function
+ * bit 48	: Reserved
+ * bit 49-55	: Device Class
+ * bit 56-59	: Device Class Instance
+ * bit 60-62	: Industry Group
+ * bit 63	: Self-Configurable Address
+ */
+typedef __u64 name_t;
+#define CAN_ISOBUS_SC_MASK	0x8000000000000000LU
 struct isobus_name {
 	__u8 self_conf_addr : 1;
 	__u8 industry_group : 3;
@@ -72,9 +87,7 @@ struct isobus_mesg {
 /* Network Management */
 #define CAN_ISOBUS_NULL_ADDR	254
 #define CAN_ISOBUS_GLOBAL_ADDR	255
-#define CAN_ISOBUS_MIN_ADDR	127
-#define CAN_ISOBUS_MAX_ADDR	247
-#define CAN_ISOBUS_ADDR_CLAIM_TIMEOUT	250000000LU
+#define CAN_ISOBUS_ANY_ADDR	CAN_ISOBUS_GLOBAL_ADDR
 #define ISOBUS_PGN_REQUEST	59904LU
 #define ISOBUS_PGN_ADDR_CLAIMED	60928LU
 #define ISOBUS_PGN_COMMANDED_ADDR	65240LU
