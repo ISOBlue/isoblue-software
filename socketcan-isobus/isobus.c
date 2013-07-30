@@ -93,7 +93,6 @@ struct isobus_sock {
 	struct notifier_block notifier;
 	int loopback;
 	int recv_own_msgs;
-	int fd_frames;
 	int count;                 /* number of active filters */
 	struct can_filter dfilter; /* default/single filter */
 	struct can_filter *filter; /* pointer to filter(s) */
@@ -107,7 +106,7 @@ struct isobus_sock {
 		ISOBUS_WAIT_ADDR,
 		ISOBUS_WAIT_HAVE_ADDR,
 		ISOBUS_HAVE_ADDR,
-		ISOBUS_LOST_ADDR
+		ISOBUS_LOST_ADDR,
 	} state;
 	wait_queue_head_t wait;
 
@@ -164,11 +163,13 @@ static inline long isobus_rtxd(void)
 #define CANID_PF(id)	((id >> 16) & 0xFF)
 #define CANID_DP(id)	((id >> 24) & 1)
 #define CANID_EDP(id)	((id >> 25) & 1)
+#define CANID_PRI(id)	((id >> 26) & 7)
 #define CANID_PDU_FMT(id) (CANID_PF(id) < 240 ? 1 : 2)
 #define PGN_PS(pgn)	CANID_PS(pgn << 8)
 #define PGN_PF(pgn)	CANID_PF(pgn << 8)
 #define PGN_DP(pgn)	CANID_DP(pgn << 8)
 #define PGN_EDP(pgn)	CANID_EDP(pgn << 8)
+#define PGN_PRI(pgn)	CANID_PRI(pgn << 8)
 #define PGN_PDU_FMT(pgn)	CANID_PDU_FMT(pgn << 8)
 /* Determine the PGN of a CAN frame */
 static inline pgn_t get_pgn(canid_t id)
@@ -209,13 +210,9 @@ static void isobus_rcv(struct sk_buff *oskb, void *data)
 	/* set pointer to received CAN frame */
 	cf = (struct can_frame *) oskb->data;
 
-	/* do not pass frames with DLC > 8 to a legacy socket */
-	if (!ro->fd_frames) {
-		struct canfd_frame *cfd = (struct canfd_frame *)oskb->data;
-
-		if (unlikely(cfd->len > CAN_MAX_DLEN)) {
-			return;
-		}
+	/* do not pass frames with DLC > 8 */
+	if (unlikely(cf->can_dlc > CAN_MAX_DLEN)) {
+		return;
 	}
 
 	/* Check for invalid PGNs */
@@ -341,15 +338,8 @@ static int isobus_sendmsg(struct kiocb *iocb, struct socket *sock,
 		return -EINVAL;
 	}
 
-	/*
-	if (ro->fd_frames) {
-		if (unlikely(size != CANFD_MTU && size != CAN_MTU))
-			return -EINVAL;
-	} else {
-		if (unlikely(size != CAN_MTU))
-			return -EINVAL;
-	}
-	*/
+	if (unlikely(size != CAN_MTU))
+		return -EINVAL;
 
 	dev = dev_get_by_index(&init_net, ifindex);
 	if (!dev)
@@ -541,7 +531,7 @@ static void isobus_req_addr_claimed_handler(struct sk_buff *skb, void *data)
 }
 
 static int isobus_enable_filters(struct net_device *dev, struct sock *sk,
-			      struct can_filter *filter, int count)
+			    struct can_filter *filter, int count)
 {
 	int err = 0;
 	int i;
@@ -766,6 +756,42 @@ static int isobus_getname(struct socket *sock, struct sockaddr *uaddr,
 	return 0;
 }
 
+/* TODO: Things matching multiple filters will be "received" multiple times */
+#define CANID(pri, pgn, da, sa) \
+	(((pri & CAN_ISOBUS_PRI_MASK) << 26) | \
+	 ((pgn & CAN_ISOBUS_PGN_MASK) << 8) | \
+	 ((da & CAN_ISOBUS_ADDR_MASK) << 8) | \
+	 (sa & CAN_ISOBUS_ADDR_MASK))
+static inline int isobus_filter_conv(struct isobus_filter *fi,
+		struct can_filter *f, int count) {
+	int i;
+	pgn_t pgn_mask;
+
+	for(i = 0; i < count; i++) {
+		pgn_mask = fi[i].pgn_mask;
+
+		if(PGN_PDU_FMT(fi[i].pgn) == 2) {
+			if(fi[i].daddr_mask) {
+				/* PDU2 format PGNs with a DA are invalid */
+				return -EINVAL;
+			}
+		} else {
+			pgn_mask &= CAN_ISOBUS_PGN1_MASK;
+		}
+
+
+		f[i].can_id = CANID(fi[i].pri, fi[i].pgn, fi[i].daddr, fi[i].saddr);
+		f[i].can_mask = CANID(fi[i].pri_mask, pgn_mask, fi[i].daddr_mask,
+				fi[i].saddr_mask);
+
+		if(fi[i].inverted) {
+			f[i].can_id |= CAN_INV_FILTER;
+		}
+	}
+
+	return 0;
+}
+
 static int isobus_setsockopt(struct socket *sock, int level, int optname,
 			  char __user *optval, unsigned int optlen)
 {
@@ -773,8 +799,9 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 	struct isobus_sock *ro = isobus_sk(sk);
 	struct can_filter *filter = NULL;  /* dyn. alloc'ed filters */
 	struct can_filter sfilter;         /* single filter */
+	struct isobus_filter *ifilter;
+	struct isobus_filter sifilter;
 	struct net_device *dev = NULL;
-	can_err_mask_t err_mask = 0;
 	int count = 0;
 	int err = 0;
 
@@ -784,19 +811,31 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 	switch (optname) {
 
 	case CAN_ISOBUS_FILTER:
-		if (optlen % sizeof(struct can_filter) != 0)
+		if (optlen % sizeof(struct isobus_filter) != 0)
 			return -EINVAL;
 
-		count = optlen / sizeof(struct can_filter);
+		count = optlen / sizeof(struct isobus_filter);
 
 		if (count > 1) {
 			/* filter does not fit into dfilter => alloc space */
-			filter = memdup_user(optval, optlen);
-			if (IS_ERR(filter))
-				return PTR_ERR(filter);
+			ifilter = memdup_user(optval, optlen);
+			if (IS_ERR(ifilter))
+				return PTR_ERR(ifilter);
+
+			/* Interpret ISOBUS filters */
+			filter = kmalloc(count * sizeof(*filter), GFP_KERNEL);
+			err = isobus_filter_conv(ifilter, filter, count);
+			kfree(ifilter);
 		} else if (count == 1) {
-			if (copy_from_user(&sfilter, optval, sizeof(sfilter)))
+			if (copy_from_user(&sifilter, optval, sizeof(sfilter)))
 				return -EFAULT;
+
+			/* Interpret ISOBUS filter */
+			err = isobus_filter_conv(&sifilter, &sfilter, 1);
+		}
+
+		if(err) {
+			return err;
 		}
 
 		lock_sock(sk);
@@ -842,43 +881,6 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 
 		break;
 
-	case CAN_ISOBUS_ERR_FILTER:
-		if (optlen != sizeof(err_mask))
-			return -EINVAL;
-
-		if (copy_from_user(&err_mask, optval, optlen))
-			return -EFAULT;
-
-		err_mask &= CAN_ERR_MASK;
-
-		lock_sock(sk);
-
-		if (ro->bound && ro->ifindex)
-			dev = dev_get_by_index(&init_net, ro->ifindex);
-
-		/* remove current error mask */
-		if (ro->bound) {
-			/* (try to) register the new err_mask */
-			err = isobus_enable_errfilter(dev, sk, err_mask);
-
-			if (err)
-				goto out_err;
-
-			/* remove old err_mask registration */
-			isobus_disable_errfilter(dev, sk, ro->err_mask);
-		}
-
-		/* link new err_mask to the socket */
-		ro->err_mask = err_mask;
-
- out_err:
-		if (dev)
-			dev_put(dev);
-
-		release_sock(sk);
-
-		break;
-
 	case CAN_ISOBUS_LOOPBACK:
 		if (optlen != sizeof(ro->loopback))
 			return -EINVAL;
@@ -893,15 +895,6 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 			return -EINVAL;
 
 		if (copy_from_user(&ro->recv_own_msgs, optval, optlen))
-			return -EFAULT;
-
-		break;
-
-	case CAN_ISOBUS_FD_FRAMES:
-		if (optlen != sizeof(ro->fd_frames))
-			return -EINVAL;
-
-		if (copy_from_user(&ro->fd_frames, optval, optlen))
 			return -EFAULT;
 
 		break;
@@ -946,12 +939,6 @@ static int isobus_getsockopt(struct socket *sock, int level, int optname,
 			err = put_user(len, optlen);
 		return err;
 
-	case CAN_ISOBUS_ERR_FILTER:
-		if (len > sizeof(can_err_mask_t))
-			len = sizeof(can_err_mask_t);
-		val = &ro->err_mask;
-		break;
-
 	case CAN_ISOBUS_LOOPBACK:
 		if (len > sizeof(int))
 			len = sizeof(int);
@@ -962,12 +949,6 @@ static int isobus_getsockopt(struct socket *sock, int level, int optname,
 		if (len > sizeof(int))
 			len = sizeof(int);
 		val = &ro->recv_own_msgs;
-		break;
-
-	case CAN_ISOBUS_FD_FRAMES:
-		if (len > sizeof(int))
-			len = sizeof(int);
-		val = &ro->fd_frames;
 		break;
 
 	default:
@@ -986,9 +967,7 @@ static int isobus_recvmsg(struct kiocb *iocb, struct socket *sock,
 		       struct msghdr *msg, size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
-	struct isobus_sock *ro = isobus_sk(sk);
 	struct sk_buff *skb;
-	int rxmtu;
 	int err = 0;
 	int noblock;
 
@@ -1000,20 +979,10 @@ static int isobus_recvmsg(struct kiocb *iocb, struct socket *sock,
 		return err;
 	}
 
-	/*
-	 * when serving a legacy socket the DLC <= 8 is already checked inside
-	 * isobus_rcv(). Now check if we need to pass a canfd_frame to a legacy
-	 * socket and cut the possible CANFD_MTU/CAN_MTU length to CAN_MTU
-	 */
-	if (!ro->fd_frames)
-		rxmtu = CAN_MTU;
-	else
-		rxmtu = skb->len;
-
-	if (size < rxmtu)
+	if (size < CAN_MTU)
 		msg->msg_flags |= MSG_TRUNC;
 	else
-		size = rxmtu;
+		size = CAN_MTU;
 
 	err = memcpy_toiovec(msg->msg_iov, skb->data, size);
 	if (err < 0) {
@@ -1211,7 +1180,6 @@ static int isobus_init(struct sock *sk)
 	/* set default loopback behaviour */
 	ro->loopback         = 1;
 	ro->recv_own_msgs    = 0;
-	ro->fd_frames        = 0;
 
 	/* Set default address */
 	ro->pref_addr = CAN_ISOBUS_NULL_ADDR;

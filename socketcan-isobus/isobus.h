@@ -22,10 +22,8 @@
 
 enum {
 	CAN_ISOBUS_FILTER = 1,	/* set 0 .. n can_filter(s)          */
-	CAN_ISOBUS_ERR_FILTER,	/* set filter for error frames       */
 	CAN_ISOBUS_LOOPBACK,	/* local loopback (default:on)       */
 	CAN_ISOBUS_RECV_OWN_MSGS,	/* receive my own msgs (default:off) */
-	CAN_ISOBUS_FD_FRAMES,	/* allow CAN FD frames (default:off) */
 };
 
 /* 
@@ -60,8 +58,6 @@ typedef __u32 pgn_t;
 
 /* Message Filtering */
 struct isobus_filter {
-	/* CAN interface */
-	int ifindex;
 	/* Priority */
 	__u8 pri, pri_mask : 3;
 	/* PGN */
@@ -71,8 +67,12 @@ struct isobus_filter {
 	/* Source address */
 	__u8 saddr, saddr_mask;
 	/* Flag to invert this filter (excluding interface */
-	unsigned int inverted : 1;
+	int inverted : 1;
 };
+#define CAN_ISOBUS_PRI_MASK	0x07U
+#define CAN_ISOBUS_PGN_MASK	0x03FFFFLU
+#define CAN_ISOBUS_PGN1_MASK	0x03FF00LU
+#define CAN_ISOBUS_ADDR_MASK	0xFFU
 
 /* Transport Protocol */
 #define ISOBUS_MAX_DLEN	1785
@@ -85,8 +85,8 @@ struct isobus_mesg {
 };
 
 /* Network Management */
-#define CAN_ISOBUS_NULL_ADDR	254
-#define CAN_ISOBUS_GLOBAL_ADDR	255
+#define CAN_ISOBUS_NULL_ADDR	254U
+#define CAN_ISOBUS_GLOBAL_ADDR	255U
 #define CAN_ISOBUS_ANY_ADDR	CAN_ISOBUS_GLOBAL_ADDR
 #define ISOBUS_PGN_REQUEST	59904LU
 #define ISOBUS_PGN_ADDR_CLAIMED	60928LU
@@ -94,7 +94,7 @@ struct isobus_mesg {
 /* Ancillary data */
 enum {
 	CAN_ISOBUS_SADDR,
-	CAN_ISOBUS_DADDR
+	CAN_ISOBUS_DADDR,
 };
 
 #endif
