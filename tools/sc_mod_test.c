@@ -1,3 +1,32 @@
+/*
+ * Test program for SocketCAN CAN_ISOBUS protocol.
+ *
+ * Attempts to send a message, then read messages using the a CAN_ISOBUS socket.
+ *
+ *
+ * Author: Alex Layton <awlayton@purdue.edu>
+ *
+ * Copyright (C) 2013 Purdue University
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -19,6 +48,7 @@ int main(int argc, char *argv[]) {
 	int i;
 	struct msghdr msg;
 	struct iovec iov;
+	unsigned int tmp;
 
 	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval))+CMSG_SPACE(sizeof(__u32))];
 	struct isobus_mesg mesg;
@@ -34,7 +64,8 @@ int main(int argc, char *argv[]) {
 
 	addr.can_family  = AF_CAN;
 	addr.can_ifindex = ifr.ifr_ifindex; 
-	sscanf(argv[2], "%2x", &addr.can_addr.isobus.addr);
+	sscanf(argv[2], "%2x", &tmp);
+	addr.can_addr.isobus.addr = tmp;
 
 	if(bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		perror("Error in socket bind");
