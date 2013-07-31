@@ -66,7 +66,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Alex Layton <awlayton@purdue.edu>, "
 		"Urs Thuermann <urs.thuermann@volkswagen.de>, "
 		"Oliver Hartkopp <oliver.hartkopp@volkswagen.de>");
-MODULE_ALIAS("can-proto-8");
+MODULE_ALIAS("can-proto-" __stringify(CAN_ISOBUS));
 
 #define MASK_ALL 0
 
