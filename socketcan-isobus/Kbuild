@@ -1,10 +1,9 @@
 # can must be rebuilt to add a new protocol
 obj-m	+= can.o
-can-y	:=patched/af_can.o patched/proc.o
+can-y	:= patched/af_can.o patched/proc.o
 
 obj-m	+= can-isobus.o
 can-isobus-y	:= isobus.o
 
 # Put debug symbols in the modules
 ccflags-y += -g
-
