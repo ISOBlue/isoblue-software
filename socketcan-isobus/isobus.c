@@ -68,14 +68,48 @@ MODULE_AUTHOR("Alex Layton <awlayton@purdue.edu>, "
 		"Oliver Hartkopp <oliver.hartkopp@volkswagen.de>");
 MODULE_ALIAS("can-proto-" __stringify(CAN_ISOBUS));
 
-#define MASK_ALL 0
-
 #define ISOBUS_MIN_SC_ADDR	128U
 #define ISOBUS_MAX_SC_ADDR	247U
+
+/* Macros for going between CAN IDs and PDU/PGN fields */
+#define ISOBUS_PRI_POS	26
+#define ISOBUS_PRI_MASK	0x07U
+#define ISOBUS_PGN_POS	8
+#define ISOBUS_PGN_MASK	0x03FFFFLU
+#define ISOBUS_PGN1_MASK	0x03FF00LU
+#define ISOBUS_PF_POS	8
+#define ISOBUS_PF_MASK	0xFFU
+#define ISOBUS_PS_POS	16
+#define ISOBUS_PS_MASK	0xFFU
+#define ISOBUS_SA_POS	0
+#define ISOBUS_SA_MASK	0xFFU
+#define ISOBUS_DP_POS	24
+#define ISOBUS_DP_MASK	0x01U
+#define ISOBUS_EDP_POS	25
+#define ISOBUS_EDP_MASK	0x01U
+#define CANID(pri, pgn, da, sa)	( \
+		CAN_EFF_FLAG | \
+		((pri & ISOBUS_PRI_MASK) << ISOBUS_PRI_POS) | \
+		((pgn & ISOBUS_PGN_MASK) << ISOBUS_PGN_POS) | \
+		((da & ISOBUS_PS_MASK) << ISOBUS_PF_POS) | \
+		((sa & ISOBUS_SA_MASK) << ISOBUS_SA_POS) )
+#define ID_FIELD(id, field)	\
+	((id >> ISOBUS_ ## field ## _POS) & ISOBUS_ ## field ## _MASK)
+#define PGN_FIELD(pgn, field)	ID_FIELD(pgn << ISOBUS_PGN_POS, field)
+#define ISOBUS_MIN_PDU2	240
+#define ID_PDU_FMT(id) (ID_FIELD(id, PF) < ISOBUS_MIN_PDU2 ? 1 : 2)
+#define PGN_PDU_FMT(pgn)	ID_PDU_FMT(pgn << ISOBUS_PGN_POS)
 
 /* Timeouts etc. (100's on ns) */
 #define ISOBUS_ADDR_CLAIM_TIMEOUT	2500L
 #define ISOBUS_RTXD_MULTIPLIER	6L
+
+/* Priority stuff */
+#define MIN_PRI	0
+#define MAX_PRI	7
+#define ISOBUS_PRIO(p)	\
+	(MAX_PRI - ((p < MIN_PRI ? MIN_PRI : p) > MAX_PRI ? MAX_PRI : p) + MIN_PRI)
+#define SK_PRIO(p)	(MAX_PRI - p + MIN_PRI)
 
 /*
  * A isobus socket has a list of can_filters attached to it, each receiving
@@ -158,36 +192,22 @@ static inline long isobus_rtxd(void)
 	return l * ISOBUS_RTXD_MULTIPLIER;
 }
 
-/* Macros for accessing the fields that make up a PGN */
-#define CANID_PS(id)	((id >> 8) & 0xFF)
-#define CANID_PF(id)	((id >> 16) & 0xFF)
-#define CANID_DP(id)	((id >> 24) & 1)
-#define CANID_EDP(id)	((id >> 25) & 1)
-#define CANID_PRI(id)	((id >> 26) & 7)
-#define CANID_PDU_FMT(id) (CANID_PF(id) < 240 ? 1 : 2)
-#define PGN_PS(pgn)	CANID_PS(pgn << 8)
-#define PGN_PF(pgn)	CANID_PF(pgn << 8)
-#define PGN_DP(pgn)	CANID_DP(pgn << 8)
-#define PGN_EDP(pgn)	CANID_EDP(pgn << 8)
-#define PGN_PRI(pgn)	CANID_PRI(pgn << 8)
-#define PGN_PDU_FMT(pgn)	CANID_PDU_FMT(pgn << 8)
 /* Determine the PGN of a CAN frame */
 static inline pgn_t get_pgn(canid_t id)
 {
 	pgn_t pgn;
 
 	/* PDU1 format */
-	if(CANID_PDU_FMT(id) == 1) {
-		pgn = (id >> 8) & 0x3FF00;
+	if(ID_PDU_FMT(id) == 1) {
+		pgn = (id >> ISOBUS_PGN_POS) & ISOBUS_PGN1_MASK;
 	}
 	/* PDU2 format */
 	else {
-		pgn = (id >> 8) & 0x3FFFF;
+		pgn = (id >> ISOBUS_PGN_POS) & ISOBUS_PGN_MASK;
 	}
 
 	return pgn;
 }
-#define CANID_SA(id) (id & 0xFF)
 
 /* Called when a CAN frame is received */
 /* TODO: Add support for connections */
@@ -216,8 +236,8 @@ static void isobus_rcv(struct sk_buff *oskb, void *data)
 	}
 
 	/* Check for invalid PGNs */
-	if(CANID_EDP(cf->can_id)) {
-		if(CANID_DP(cf->can_id)) {
+	if(ID_FIELD(cf->can_id, EDP)) {
+		if(ID_FIELD(cf->can_id, DP)) {
 			/* 
 			 * Check for ISO 15765-3 PGNs which can coexist with ISO 11783 PGNs
 			 * but have a different format for the CAN identifier.
@@ -264,7 +284,7 @@ static void isobus_rcv(struct sk_buff *oskb, void *data)
 	memset(addr, 0, sizeof(*addr));
 	addr->can_family  = AF_CAN;
 	addr->can_ifindex = skb->dev->ifindex;
-	addr->can_addr.isobus.addr = CANID_SA(cf->can_id);
+	addr->can_addr.isobus.addr = ID_FIELD(cf->can_id, SA);
 
 	/* add CAN specific message flags for isobus_recvmsg() */
 	pflags = isobus_flags(skb);
@@ -357,8 +377,7 @@ static int isobus_sendmsg(struct kiocb *iocb, struct socket *sock,
 		goto free_skb;
 	}
 	/* Fill out CAN frame with ISOBUS message */
-	/* TODO: Implement priority */
-	cf->can_id = (1 << 31) | ((mesg->pgn | da) << 8) | ro->s_addr;
+	cf->can_id = CANID(ISOBUS_PRIO(sk->sk_priority), mesg->pgn, da, ro->s_addr);
 	memcpy(cf->data, mesg->data, cf->can_dlc = mesg->dlen);
 
 	sock_tx_timestamp(sk, &skb_shinfo(skb)->tx_flags);
@@ -415,8 +434,8 @@ static int isobus_send(struct isobus_sock *ro, struct isobus_mesg *mesg,
 	}
 
 	/* Fill out CAN frame with ISOBUS message */
-	/* TODO: Implement priority */
-	cf->can_id = (1 << 31) | ((mesg->pgn | addr) << 8) | ro->s_addr;
+	cf->can_id = CANID(ISOBUS_PRIO(ro->sk.sk_priority), mesg->pgn,
+			addr, ro->s_addr);
 	memcpy(cf->data, mesg->data, cf->can_dlc = mesg->dlen);
 
 	err = can_send(skb, 1);
@@ -455,7 +474,7 @@ static void isobus_addr_claimed_handler(struct sk_buff *skb, void *data)
 	cf = (struct can_frame *) skb->data;
 
 	/* Get source address of message */
-	sa = CANID_SA(cf->can_id);
+	sa = ID_FIELD(cf->can_id, SA);
 
 	/* Record occupied addresses in the self-configurable range */
 	if(sa <= ISOBUS_MAX_SC_ADDR && sa >= ISOBUS_MIN_SC_ADDR) {
@@ -522,8 +541,8 @@ static void isobus_req_addr_claimed_handler(struct sk_buff *skb, void *data)
 
 	/* Check if claimed address is mine */
 	/* TODO: Should this check be done with filters? */
-	if(CANID_PS(cf->can_id) == ro->s_addr ||
-			CANID_PS(cf->can_id) == CAN_ISOBUS_GLOBAL_ADDR) {
+	if(ID_FIELD(cf->can_id, PS) == ro->s_addr ||
+			ID_FIELD(cf->can_id, PS) == CAN_ISOBUS_GLOBAL_ADDR) {
 		mesg = addr_claimed_mesg;
 		*mesg.data = NAME2DATA(ro->name);
 		isobus_send(ro, &mesg, CAN_ISOBUS_GLOBAL_ADDR);
@@ -571,18 +590,22 @@ static int isobus_enable_nmfilters(struct net_device *dev, struct sock *sk)
 	int err;
 
 	err = can_rx_register(dev,
-			(ISOBUS_PGN_ADDR_CLAIMED | CAN_ISOBUS_GLOBAL_ADDR) << 8, 
-			0x3FFFF << 8, isobus_addr_claimed_handler, sk, "isobus-nm");
+			CANID(0, ISOBUS_PGN_ADDR_CLAIMED, CAN_ISOBUS_GLOBAL_ADDR, 0),
+			CANID(0, ISOBUS_PGN1_MASK, ISOBUS_PS_MASK, 0),
+			isobus_addr_claimed_handler, sk, "isobus-nm");
 	if(err) {
 		return err;
 	}
 
-	err = can_rx_register(dev, ISOBUS_PGN_REQUEST << 8, 
-			0x3FF00 << 8, isobus_req_addr_claimed_handler, sk, "isobus-nm");
+	err = can_rx_register(dev,
+			CANID(0, ISOBUS_PGN_REQUEST, 0, 0),
+			CANID(0, ISOBUS_PGN1_MASK, 0, 0),
+			isobus_req_addr_claimed_handler, sk, "isobus-nm");
 	if(err) {
 		can_rx_unregister(dev,
-				(ISOBUS_PGN_ADDR_CLAIMED | CAN_ISOBUS_GLOBAL_ADDR) << 8, 
-				0x3FFFF << 8, isobus_addr_claimed_handler, sk);
+				CANID(0, ISOBUS_PGN_ADDR_CLAIMED, CAN_ISOBUS_GLOBAL_ADDR, 0),
+				CANID(0, ISOBUS_PGN1_MASK, ISOBUS_PS_MASK, 0),
+				isobus_addr_claimed_handler, sk);
 	}
 
 	return err;
@@ -612,10 +635,13 @@ static inline void isobus_disable_nmfilters(struct net_device *dev,
 		struct sock *sk)
 {
 	can_rx_unregister(dev,
-			(ISOBUS_PGN_ADDR_CLAIMED | CAN_ISOBUS_GLOBAL_ADDR) << 8, 
-			0x3FFFF << 8, isobus_addr_claimed_handler, sk);
-	can_rx_unregister(dev, ISOBUS_PGN_REQUEST << 8, 
-			0x3FF00 << 8, isobus_req_addr_claimed_handler, sk);
+			CANID(0, ISOBUS_PGN_ADDR_CLAIMED, CAN_ISOBUS_GLOBAL_ADDR, 0),
+			CANID(0, ISOBUS_PGN1_MASK, ISOBUS_PS_MASK, 0),
+			isobus_addr_claimed_handler, sk);
+	can_rx_unregister(dev, 
+			CANID(0, ISOBUS_PGN_REQUEST, 0, 0),
+			CANID(0, ISOBUS_PGN1_MASK, 0, 0),
+			isobus_req_addr_claimed_handler, sk);
 }
 
 static inline void isobus_disable_allfilters(struct net_device *dev,
@@ -757,11 +783,6 @@ static int isobus_getname(struct socket *sock, struct sockaddr *uaddr,
 }
 
 /* TODO: Things matching multiple filters will be "received" multiple times */
-#define CANID(pri, pgn, da, sa) \
-	(((pri & CAN_ISOBUS_PRI_MASK) << 26) | \
-	 ((pgn & CAN_ISOBUS_PGN_MASK) << 8) | \
-	 ((da & CAN_ISOBUS_ADDR_MASK) << 8) | \
-	 (sa & CAN_ISOBUS_ADDR_MASK))
 static inline int isobus_filter_conv(struct isobus_filter *fi,
 		struct can_filter *f, int count) {
 	int i;
@@ -779,10 +800,8 @@ static inline int isobus_filter_conv(struct isobus_filter *fi,
 			pgn_mask &= CAN_ISOBUS_PGN1_MASK;
 		}
 
-
-		f[i].can_id = CANID(fi[i].pri, fi[i].pgn, fi[i].daddr, fi[i].saddr);
-		f[i].can_mask = CANID(fi[i].pri_mask, pgn_mask, fi[i].daddr_mask,
-				fi[i].saddr_mask);
+		f[i].can_id = CANID(0, fi[i].pgn, fi[i].daddr, fi[i].saddr);
+		f[i].can_mask = CANID(0, pgn_mask, fi[i].daddr_mask, fi[i].saddr_mask);
 
 		if(fi[i].inverted) {
 			f[i].can_id |= CAN_INV_FILTER;
@@ -804,6 +823,7 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 	struct net_device *dev = NULL;
 	int count = 0;
 	int err = 0;
+	int tmp;
 
 	if (level != SOL_CAN_ISOBUS)
 		return -EINVAL;
@@ -876,9 +896,7 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
  out_fil:
 		if (dev)
 			dev_put(dev);
-
 		release_sock(sk);
-
 		break;
 
 	case CAN_ISOBUS_LOOPBACK:
@@ -887,7 +905,6 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 
 		if (copy_from_user(&ro->loopback, optval, optlen))
 			return -EFAULT;
-
 		break;
 
 	case CAN_ISOBUS_RECV_OWN_MSGS:
@@ -896,7 +913,21 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 
 		if (copy_from_user(&ro->recv_own_msgs, optval, optlen))
 			return -EFAULT;
+		break;
 
+	case CAN_ISOBUS_SEND_PRIO:
+		if (optlen != sizeof(tmp))
+			return -EINVAL;
+
+		if (copy_from_user(&tmp, optval, optlen))
+			return -EFAULT;
+
+		if ((tmp < MIN_PRI) || (tmp > MAX_PRI))
+			return -EDOM;
+
+		lock_sock(sk);
+		sk->sk_priority = SK_PRIO(tmp);
+		release_sock(sk);
 		break;
 
 	default:
@@ -913,6 +944,9 @@ static int isobus_getsockopt(struct socket *sock, int level, int optname,
 	int len;
 	void *val;
 	int err = 0;
+	int tmp;
+
+	val = &tmp;
 
 	if (level != SOL_CAN_ISOBUS)
 		return -EINVAL;
@@ -949,6 +983,12 @@ static int isobus_getsockopt(struct socket *sock, int level, int optname,
 		if (len > sizeof(int))
 			len = sizeof(int);
 		val = &ro->recv_own_msgs;
+		break;
+
+	case CAN_ISOBUS_SEND_PRIO:
+		if (len > sizeof(int))
+			len = sizeof(int);
+		tmp = ISOBUS_PRIO(sk->sk_priority);
 		break;
 
 	default:
@@ -1171,9 +1211,12 @@ static int isobus_init(struct sock *sk)
 	ro->bound            = 0;
 	ro->ifindex          = 0;
 
-	/* set default filter to single entry dfilter */
-	ro->dfilter.can_id   = 0;
-	ro->dfilter.can_mask = MASK_ALL;
+	/*
+	 * set default filter to single entry dfilter
+	 * ISOBUS only uses extended frame format
+	 */
+	ro->dfilter.can_id   = CAN_EFF_FLAG;
+	ro->dfilter.can_mask = CAN_EFF_FLAG;
 	ro->filter           = &ro->dfilter;
 	ro->count            = 1;
 
@@ -1182,13 +1225,15 @@ static int isobus_init(struct sock *sk)
 	ro->recv_own_msgs    = 0;
 
 	/* Set default address */
-	ro->pref_addr = CAN_ISOBUS_NULL_ADDR;
+	ro->pref_addr = CAN_ISOBUS_ANY_ADDR;
 	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
 	ro->name = -1;
 
+	/* Set default priority */
+	sk->sk_priority = SK_PRIO(6);
+
 	/* Set default state */
 	ro->state = ISOBUS_IDLE;
-
 	init_waitqueue_head(&ro->wait);
 
 	/* set notifier */

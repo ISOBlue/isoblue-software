@@ -24,6 +24,7 @@ enum {
 	CAN_ISOBUS_FILTER = 1,	/* set 0 .. n can_filter(s)          */
 	CAN_ISOBUS_LOOPBACK,	/* local loopback (default:on)       */
 	CAN_ISOBUS_RECV_OWN_MSGS,	/* receive my own msgs (default:off) */
+	CAN_ISOBUS_SEND_PRIO,	/* ISOBUS send priority 0:hi-7:low (default:6) */
 };
 
 /* 
@@ -58,8 +59,6 @@ typedef __u32 pgn_t;
 
 /* Message Filtering */
 struct isobus_filter {
-	/* Priority */
-	__u8 pri, pri_mask : 3;
 	/* PGN */
 	pgn_t pgn, pgn_mask;
 	/* Directed address, not meaningful with some PGNs */
@@ -69,7 +68,6 @@ struct isobus_filter {
 	/* Flag to invert this filter (excluding interface */
 	int inverted : 1;
 };
-#define CAN_ISOBUS_PRI_MASK	0x07U
 #define CAN_ISOBUS_PGN_MASK	0x03FFFFLU
 #define CAN_ISOBUS_PGN1_MASK	0x03FF00LU
 #define CAN_ISOBUS_ADDR_MASK	0xFFU
