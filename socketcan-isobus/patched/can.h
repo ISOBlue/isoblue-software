@@ -118,9 +118,8 @@ struct canfd_frame {
 #define CAN_TP20	4 /* VAG Transport Protocol v2.0 */
 #define CAN_MCNET	5 /* Bosch MCNet */
 #define CAN_ISOTP	6 /* ISO 15765-2 Transport Protocol */
-#define CAN_PDU 7
-#define CAN_ISOBUS	8
-#define CAN_NPROTO	9
+#define CAN_ISOBUS	7 /* ISO 11783 Messages (ISOBUS) */
+#define CAN_NPROTO	8
 
 #define SOL_CAN_BASE 100
 
@@ -136,6 +135,8 @@ struct sockaddr_can {
 	union {
 		/* transport protocol class address information (e.g. ISOTP) */
 		struct { canid_t rx_id, tx_id; } tp;
+
+		struct { __u8 addr; } isobus;
 
 		/* reserved for future CAN protocols address information */
 	} can_addr;
