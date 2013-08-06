@@ -1,0 +1,17 @@
+# /etc/systemd/system/isoblue@.service
+
+[Unit]
+Description=ISOBlue Server on Channel %I
+After=bluetooth.service can-interfaces.service sysinit.target
+Requires=bluetooth.service isoblue-interfaces.service
+
+[Service]
+ExecStart=/usr/bin/rfcomm listen %I %I \
+	/bin/sh -c 'sdptool del $1; isoblue ib_eng ib_imp < $2 > $2' isoblue %I {}
+ExecStartPost=/usr/bin/sdptool add --handle=%I --channel=%I SP
+ExecStop=/usr/bin/sdptool del %I
+Restart=always
+
+[Install]
+Alias=multi-user.target.wants/isoblue@2.service
+WantedBy=multi-user.target

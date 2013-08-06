@@ -1,0 +1,13 @@
+# /etc/systemd/system/can-log@.service
+
+[Unit]
+Description=Bluetooth CAN Log on Channel %I
+After=sysinit.target
+
+[Service]
+ExecStart=/usr/bin/rfcomm watch %I %I /usr/bin/can_log_raw {}
+Restart=always
+
+[Install]
+Alias=multi-user.target.wants/can-log@1.service
+WantedBy=multi-user.target
