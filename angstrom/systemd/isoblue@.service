@@ -2,7 +2,7 @@
 
 [Unit]
 Description=ISOBlue Server on Channel %I
-After=bluetooth.service can-interfaces.service sysinit.target
+After=bluetooth.service isoblue-interfaces.service sysinit.target
 Requires=bluetooth.service isoblue-interfaces.service
 
 [Service]
