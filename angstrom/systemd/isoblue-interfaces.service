@@ -1,0 +1,17 @@
+# /etc/systemd/system/isoblue-interfaces.service
+
+[Unit]
+Description=Bring CAN Interfaces Up
+After=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/ip link set ib_eng type can bitrate 250000
+ExecStartPre=/bin/ip link set ib_imp type can bitrate 250000
+ExecStart=/sbin/ifconfig ib_eng up
+ExecStart=/sbin/ifconfig ib_imp up
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

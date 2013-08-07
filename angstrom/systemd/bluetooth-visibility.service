@@ -1,0 +1,15 @@
+# /etc/systemd/system/bluetooth-visibility.service
+
+[Unit]
+Description=Set Bluetooth Visibility On
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/hciconfig hci0 piscan
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=bluetooth.target

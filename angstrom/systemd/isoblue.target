@@ -1,0 +1,11 @@
+# /etc/systemd/system/isoblue.target
+
+[Unit]
+Description=ISOBlue
+
+[Install]
+Also=isoblue@2.service
+Also=isoblue@3.service
+Also=bluetooth-visibility.service
+Also=isoblue-interfaces.service
+Also=can-log@1.service
