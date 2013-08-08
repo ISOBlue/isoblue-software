@@ -5,6 +5,9 @@ CFLAGS := -Wall -g
 
 all : $(TOOLS) $(TEST)
 
+isoblue : LDLIBS += -lbluetooth -lpthread
+isoblue : ring_buf.o
+
 install : $(TOOLS:%=install_%)
 
 install_% :

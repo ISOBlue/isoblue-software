@@ -28,10 +28,15 @@
 #ifndef CIRC_BUF_H
 #define CIRC_BUF_H
 
+#include <pthread.h>
+
 struct ring_buffer
 {
 	char *address;
 	int fd;
+
+	pthread_cond_t unread_cond;
+	pthread_mutex_t unread_mut;
 
 	unsigned long count_bytes;
 	unsigned long tail_offset;
@@ -55,8 +60,12 @@ void ring_buffer_curs_advance(struct ring_buffer *buffer,
 void *ring_buffer_tail_address(struct ring_buffer *buffer);
 void ring_buffer_tail_advance(struct ring_buffer *buffer,
 		unsigned long count_bytes);
+void ring_buffer_seek_curs_head(struct ring_buffer *buffer);
+void ring_buffer_seek_curs_start(struct ring_buffer *buffer);
+void ring_buffer_seek_curs_tail(struct ring_buffer *buffer);
 unsigned long ring_buffer_filled_bytes(struct ring_buffer *buffer);
 unsigned long ring_buffer_unread_bytes(struct ring_buffer *buffer);
+void ring_buffer_wait_unread_bytes(struct ring_buffer *buffer);
 unsigned long ring_buffer_free_bytes(struct ring_buffer *buffer);
 void ring_buffer_clear(struct ring_buffer *buffer);
 

@@ -40,6 +40,11 @@
 #define FOOTER_LEN	(sizeof(((struct ring_buffer *)0)->tail_offset) + \
 		sizeof(((struct ring_buffer*)0)->head_offset))
 
+static void _ring_buffer_curs_advance(struct ring_buffer *buffer,
+		unsigned long count_bytes);
+static void _ring_buffer_tail_advance(struct ring_buffer *buffer,
+		unsigned long count_bytes);
+
 //Warning order should be at least 12 for Linux
 int ring_buffer_create(struct ring_buffer *buffer, unsigned long order,
 		char path[])
@@ -82,6 +87,9 @@ int ring_buffer_create(struct ring_buffer *buffer, unsigned long order,
 	if(address != buffer->address + buffer->count_bytes)
 		return -1;
 
+	pthread_cond_init(&buffer->unread_cond, NULL);
+	pthread_mutex_init(&buffer->unread_mut, NULL);
+
 	return buffer->fd;
 }
 
@@ -110,15 +118,18 @@ void *ring_buffer_head_address(struct ring_buffer *buffer)
 void ring_buffer_head_advance(struct ring_buffer *buffer,
 		unsigned long count_bytes)
 {
-	unsigned long dist;
+	unsigned long dist_start, dist_curs;
 
-	dist = OFF_DIST(buffer, head_offset, start_offset);
+	dist_start = OFF_DIST(buffer, head_offset, start_offset);
+	dist_curs = OFF_DIST(buffer, head_offset, curs_offset);
+
+	if(dist_start < count_bytes)
+		ring_buffer_start_advance(buffer, count_bytes - dist_start);
+	if(dist_curs < count_bytes)
+		_ring_buffer_curs_advance(buffer, count_bytes - dist_curs);
 
 	buffer->head_offset += count_bytes;
 	buffer->head_offset = _buf_mod(buffer, buffer->head_offset);
-
-	if(dist < count_bytes)
-		ring_buffer_start_advance(buffer, count_bytes - dist);
 
 	lseek(buffer->fd, -FOOTER_LEN, SEEK_END);
 	write(buffer->fd, &buffer->head_offset, sizeof(buffer->head_offset));
@@ -134,13 +145,13 @@ void ring_buffer_start_advance(struct ring_buffer *buffer,
 {
 	unsigned long dist;
 
-	dist = OFF_DIST(buffer, start_offset, curs_offset);
+	dist = OFF_DIST(buffer, start_offset, tail_offset);
+
+	if(dist < count_bytes)
+		_ring_buffer_tail_advance(buffer, count_bytes - dist);
 
 	buffer->start_offset += count_bytes;
 	buffer->start_offset = _buf_mod(buffer, buffer->start_offset);
-
-	if(dist < count_bytes)
-		ring_buffer_curs_advance(buffer, count_bytes - dist);
 }
 
 void *ring_buffer_curs_address(struct ring_buffer *buffer)
@@ -150,31 +161,64 @@ void *ring_buffer_curs_address(struct ring_buffer *buffer)
 
 void ring_buffer_seek_curs_head(struct ring_buffer *buffer)
 {
+	pthread_mutex_lock(&buffer->unread_mut);
+
 	buffer->curs_offset = buffer->head_offset;
+
+	pthread_cond_broadcast(&buffer->unread_cond);
+
+	pthread_mutex_unlock(&buffer->unread_mut);
 }
 
 void ring_buffer_seek_curs_start(struct ring_buffer *buffer)
 {
+	pthread_mutex_lock(&buffer->unread_mut);
+
 	buffer->curs_offset = buffer->start_offset;
+
+	pthread_cond_broadcast(&buffer->unread_cond);
+
+	pthread_mutex_unlock(&buffer->unread_mut);
 }
 
 void ring_buffer_seek_curs_tail(struct ring_buffer *buffer)
 {
+	pthread_mutex_lock(&buffer->unread_mut);
+
 	buffer->curs_offset = buffer->tail_offset;
+
+	pthread_cond_broadcast(&buffer->unread_cond);
+
+	pthread_mutex_unlock(&buffer->unread_mut);
 }
 
-void ring_buffer_curs_advance(struct ring_buffer *buffer,
+static void _ring_buffer_curs_advance(struct ring_buffer *buffer,
 		unsigned long count_bytes)
 {
 	unsigned long dist;
 
 	dist = OFF_DIST(buffer, curs_offset, tail_offset);
 
-	buffer->curs_offset += count_bytes;
-	buffer->curs_offset = _buf_mod(buffer, buffer->curs_offset);
+	//if(dist < count_bytes)
+		//_ring_buffer_tail_advance(buffer, count_bytes - dist);
 
 	if(dist < count_bytes)
-		ring_buffer_tail_advance(buffer, count_bytes - dist);
+		buffer->curs_offset += dist;
+	else
+		buffer->curs_offset += count_bytes;
+	buffer->curs_offset = _buf_mod(buffer, buffer->curs_offset);
+}
+
+void ring_buffer_curs_advance(struct ring_buffer *buffer,
+		unsigned long count_bytes)
+{
+	pthread_mutex_lock(&buffer->unread_mut);
+
+	_ring_buffer_curs_advance(buffer, count_bytes);
+
+	pthread_cond_broadcast(&buffer->unread_cond);
+
+	pthread_mutex_unlock(&buffer->unread_mut);
 }
 
 void *ring_buffer_tail_address(struct ring_buffer *buffer)
@@ -182,22 +226,34 @@ void *ring_buffer_tail_address(struct ring_buffer *buffer)
 	return buffer->address + buffer->tail_offset;
 }
 
-void ring_buffer_tail_advance(struct ring_buffer *buffer,
+static void _ring_buffer_tail_advance(struct ring_buffer *buffer,
 		unsigned long count_bytes)
 {
 	unsigned long dist;
 
 	dist = OFF_DIST(buffer, tail_offset, head_offset);
 
-	buffer->tail_offset += count_bytes;
-	buffer->tail_offset = _buf_mod(buffer, buffer->tail_offset);
-
 	/* There is a weird egde case when the file is empty... */
 	if(dist && dist < count_bytes)
 		ring_buffer_head_advance(buffer, count_bytes - dist + 1);
 
+	buffer->tail_offset += count_bytes;
+	buffer->tail_offset = _buf_mod(buffer, buffer->tail_offset);
+
 	lseek(buffer->fd, -sizeof(buffer->tail_offset), SEEK_END);
 	write(buffer->fd, &buffer->tail_offset, sizeof(buffer->tail_offset));
+}
+
+void ring_buffer_tail_advance(struct ring_buffer *buffer,
+		unsigned long count_bytes)
+{
+	pthread_mutex_lock(&buffer->unread_mut);
+
+	_ring_buffer_tail_advance(buffer, count_bytes);
+
+	pthread_cond_broadcast(&buffer->unread_cond);
+
+	pthread_mutex_unlock(&buffer->unread_mut);
 }
 
 unsigned long ring_buffer_filled_bytes(struct ring_buffer *buffer)
@@ -208,6 +264,17 @@ unsigned long ring_buffer_filled_bytes(struct ring_buffer *buffer)
 unsigned long ring_buffer_unread_bytes(struct ring_buffer *buffer)
 {
 	return _buf_mod(buffer, buffer->tail_offset - buffer->curs_offset);
+}
+
+void ring_buffer_wait_unread_bytes(struct ring_buffer *buffer)
+{
+	pthread_mutex_lock(&buffer->unread_mut);
+	pthread_cleanup_push(pthread_mutex_unlock, &buffer->unread_mut);
+
+	while(!ring_buffer_unread_bytes(buffer))
+		pthread_cond_wait(&buffer->unread_cond, &buffer->unread_mut);
+
+	pthread_cleanup_pop(1);
 }
 
 unsigned long ring_buffer_free_bytes(struct ring_buffer *buffer)
