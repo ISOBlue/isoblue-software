@@ -118,6 +118,7 @@ passwd: password updated successfully
 There are a few packages needed to get the files, and to compile them.
 The following commands will install and configure them.
 ```shell
+# opkg update
 # opkg install wget git kernel-dev
 # make -C /usr/src/kernel scripts
 # ln -fs /usr/src/kernel /lib/modules/`uname -r`/build
