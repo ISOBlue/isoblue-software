@@ -828,6 +828,12 @@ static inline int isobus_filter_conv(struct isobus_filter *fi,
 		if(fi[i].inverted) {
 			f[i].can_id |= CAN_INV_FILTER;
 		}
+
+		printk(KERN_DEBUG "can_isobus: %x&%x %x&%x %x&%x | %x&%x\n",
+				fi[i].pgn, fi[i].pgn_mask,
+				fi[i].daddr, fi[i].daddr_mask,
+				fi[i].saddr, fi[i].saddr_mask,
+				f[i].can_id, f[i].can_mask);
 	}
 
 	return 0;
@@ -869,7 +875,7 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 			err = isobus_filter_conv(ifilter, filter, count);
 			kfree(ifilter);
 		} else if (count == 1) {
-			if (copy_from_user(&sifilter, optval, sizeof(sfilter)))
+			if (copy_from_user(&sifilter, optval, sizeof(sifilter)))
 				return -EFAULT;
 
 			/* Interpret ISOBUS filter */
