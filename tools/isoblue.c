@@ -161,7 +161,7 @@ int main(int argc, char *argv[]) {
 	socklen_t len;
 	sdp_session_t *session;
 
-	s = malloc((argc - 2) * sizeof(*s));
+	s = calloc(argc - 2, sizeof(*s));
 	ns = argc - 2;
 	FD_ZERO(&read_fds);
 	n_read_fds = 0;
@@ -176,7 +176,7 @@ int main(int argc, char *argv[]) {
 	rc_addr.rc_channel = 0;
 
 	if(bind(bt, (struct sockaddr *)&rc_addr, sizeof(rc_addr)) < 0) {
-		perror("bind");
+		perror("bind bt");
 		return EXIT_FAILURE;
 	}
 	listen(bt, 1);
@@ -209,7 +209,7 @@ int main(int argc, char *argv[]) {
 		addr.can_addr.isobus.addr = CAN_ISOBUS_ANY_ADDR;
 
 		if(bind(s[i], (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-			perror("bind");
+			perror("bind can");
 			return EXIT_FAILURE;
 		}
 
@@ -275,7 +275,7 @@ int main(int argc, char *argv[]) {
 				}
 
 				chars += sprintf(ring_buffer_tail_address(&buf) + chars,
-						"%ld.%06ld %02x %02x",
+						"%ld.%06ld %2x %2x",
 						ts.tv_sec, ts.tv_usec,
 						addr.can_addr.isobus.addr,
 						saddr.can_addr.isobus.addr);
@@ -285,7 +285,7 @@ int main(int argc, char *argv[]) {
 
 				printf("Message received\n");
 			} else {
-				perror("recvfrom");
+				perror("recvmsg");
 			}
 		}
 	}
@@ -293,10 +293,10 @@ int main(int argc, char *argv[]) {
 	return EXIT_SUCCESS;
 }
 
+pthread_t send_thread, command_thread;
 void *bt_func(void *ptr)
 {
 	while(1) {
-		pthread_t send_thread, command_thread;
 		struct sockaddr_rc addr = { 0 };
 		socklen_t len;
 
@@ -313,7 +313,6 @@ void *bt_func(void *ptr)
 		}
 
 		pthread_join(command_thread, NULL);
-		pthread_cancel(send_thread);
 		pthread_join(send_thread, NULL);
 
 		close(rc);
@@ -340,7 +339,8 @@ void *send_func(void *ptr)
 
 		if(send(rc, mesg, chars, 0) < 0) {
 			perror("send");
-			//break;
+			pthread_cancel(command_thread);
+			break;
 		}
 		printf("%s\n", mesg);
 
@@ -350,20 +350,22 @@ void *send_func(void *ptr)
 
 	return NULL;
 }
-
 void *command_func(void *ptr)
 {
 	FILE *fp;
 
 	fp = fdopen(rc, "r");
 	setvbuf(fp, NULL, _IONBF, 0);
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
 	while(1) {
 		char op;
 		char *args;
 
+		pthread_testcancel();
 		if(fscanf(fp, "%c %m[^\n\r]%*1[\n\r]", &op, &args) != 2) {
 			perror("fscanf");
+			pthread_cancel(send_thread);
 			break;
 		}
 		printf("op %c, %s\n", op, args);
@@ -372,22 +374,25 @@ void *command_func(void *ptr)
 		case SET_FILTERS:
 		{
 			int sock;
-			int nfilts;
 			int nchars;
 			char *p;
+			struct isobus_filter *filts;
+			int nfilts;
 
 			sscanf(args, "%d %d %n", &sock, &nfilts, &nchars);
 			p = args + nchars;
 
-			struct isobus_filter *filts;
 			if(nfilts == 0) {
 				/* Receive everything when 0 filters given */
 				nfilts = 1;
 				filts = malloc(sizeof(*filts));
-				memset(filts, 0, sizeof(*filts));
 
 				filts[0].pgn = 0;
 				filts[0].pgn_mask = 0;
+				filts[0].daddr = 0;
+				filts[0].daddr_mask = 0;
+				filts[0].saddr = 0;
+				filts[0].saddr_mask = 0;
 			} else {
 				filts = calloc(nfilts, sizeof(*filts));
 				memset(filts, 0, nfilts * sizeof(*filts));
@@ -409,6 +414,7 @@ void *command_func(void *ptr)
 			}
 
 			ring_buffer_clear(&buf);
+			free(filts);
 			break;
 		}
 
