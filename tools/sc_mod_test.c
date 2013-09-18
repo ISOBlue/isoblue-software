@@ -72,6 +72,31 @@ int main(int argc, char *argv[]) {
 		return -2;
 	}
 
+	/* Set up filter(s) */
+	struct isobus_filter *filts;
+	pgn_t pgns[] = {0, 1};
+	int nfilts = sizeof(pgns) / sizeof(pgn_t);
+	filts = calloc(nfilts, sizeof(*filts));
+	for(i = 0; i < nfilts; i++) {
+		/* Filter based on PGN */
+		filts[i].pgn = 0;
+		filts[i].pgn_mask = CAN_ISOBUS_PGN_MASK;
+		/* Don't filter based on DA */
+		filts[i].daddr = 0;
+		filts[i].daddr_mask = 0;
+		/* Don't filter based on SA */
+		filts[i].saddr = 0;
+		filts[i].saddr_mask = 0;
+		/* Receive message that match (1 to reject matches) */
+		filts[i].inverted = 0;
+	}
+	/* Apply filter(s) to socket */
+	if(setsockopt(s, SOL_CAN_ISOBUS, CAN_ISOBUS_FILTER, filts,
+				nfilts * sizeof(*filts)) < 0) {
+		perror("setsockopt");
+		return -4;
+	}
+
 	/* Construct msghdr to use to recevie messages from socket */
 	msg.msg_iov = &iov;
 	msg.msg_control = &ctrlmsg;
