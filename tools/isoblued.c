@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <argp.h>
  
 #include <net/if.h>
 #include <sys/types.h>
@@ -144,6 +145,48 @@ int ns;
 int *s;
 struct ring_buffer buf;
 
+/* argp goodies */
+const char *argp_program_version = "isoblued 0.2";
+const char *argp_program_bug_address = "<bugs@isoblue.org>";
+static char doc[] = "ISOBlue Daemon -- communicates with libISOBlue";
+static char args_doc[] = "BUF_FILE [IFACE]...";
+static struct argp_option options[] = {
+	{"channel", 'c', "CHANNEL", 0, "RFCOMM Channel", 0},
+	{ 0 }
+};
+struct arguments {
+	char **ifaces;
+	int nifaces;
+	int channel;
+};
+static error_t parse_opt(int key, char *arg, struct argp_state *state) {
+	struct arguments *arguments = state->input;
+
+	switch(key) {
+	case 'c':
+		arguments->channel = atoi(arg);
+		break;
+
+	case ARGP_KEY_ARG:
+		if(state->arg_num == 0)
+			arguments->file = arg;
+		else
+			return ARGP_ERR_UNKNOWN;
+		break;
+
+	case ARGP_KEY_ARGS:
+		arguments->ifaces = state->argv + state->next;
+		arguments->nifaces = state->argc - state->next;
+		break;
+
+	default:
+		return ARGP_ERR_UNKNOWN;
+	}
+
+	return 0;
+}
+static struct argp argp = {options, parse_opt, args_doc, doc};
+
 int main(int argc, char *argv[]) {
 	struct sockaddr_can addr = { 0 };
 	socklen_t addr_len;
@@ -161,8 +204,18 @@ int main(int argc, char *argv[]) {
 	socklen_t len;
 	sdp_session_t *session;
 
-	s = calloc(argc - 2, sizeof(*s));
-	ns = argc - 2;
+	/* Handle options */
+	#define DEF_IFACES	((char*[]) {"ib_eng", "ib_imp"})
+	struct arguments arguments = {
+		"isoblue.log",
+		DEF_IFACES,
+		sizeof(DEF_IFACES) / sizeof(*DEF_IFACES),
+		0,
+	};
+	argp_parse(&argp, argc, argv, 0, 0, &arguments);
+
+	s = calloc(arguments.nifaces, sizeof(*s));
+	ns = arguments.nifaces;
 	FD_ZERO(&read_fds);
 	n_read_fds = 0;
 
@@ -173,7 +226,7 @@ int main(int argc, char *argv[]) {
 	n_read_fds = bt > n_read_fds ? bt : n_read_fds;
 	rc_addr.rc_family = AF_BLUETOOTH;
 	rc_addr.rc_bdaddr = *BDADDR_ANY;
-	rc_addr.rc_channel = 0;
+	rc_addr.rc_channel = arguments.channel;
 
 	if(bind(bt, (struct sockaddr *)&rc_addr, sizeof(rc_addr)) < 0) {
 		perror("bind bt");
@@ -188,21 +241,21 @@ int main(int argc, char *argv[]) {
 
 	session = register_service(rc_addr.rc_channel);
 
-	ring_buffer_create(&buf, 15, argv[1]);
+	ring_buffer_create(&buf, 15, arguments.file);
 	if(pthread_create(&bt_thread, NULL, bt_func, NULL) != 0) {
 		perror("bt_thread");
 		exit(EXIT_FAILURE);
 	}
 
 	/* Initialize ISOBUS sockets */
-	for(i = 0; i < argc - 2; i++) {
+	for(i = 0; i < arguments.nifaces; i++) {
 		if((s[i] = socket(PF_CAN, SOCK_DGRAM, CAN_ISOBUS)) < 0) {
 			perror("socket (can)");
 			return EXIT_FAILURE;
 		}
 
 		/* Set interface name to argument value */
-		strcpy(ifr.ifr_name, argv[i + 2]);
+		strcpy(ifr.ifr_name, arguments.ifaces[i]);
 		ioctl(s[i], SIOCGIFINDEX, &ifr);
 		addr.can_family  = AF_CAN;
 		addr.can_ifindex = ifr.ifr_ifindex; 
