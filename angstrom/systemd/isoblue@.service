@@ -2,12 +2,14 @@
 
 [Unit]
 Description=ISOBlue Server on Channel %I
-After=bluetooth.service isoblue-interfaces.service sysinit.target
+After=bluetooth.service isoblue-interfaces.service
 Requires=bluetooth.service isoblue-interfaces.service
 
 [Service]
 ExecStart=/usr/bin/isoblued --channel %I /tmp/isoblue%I.log ib_eng ib_imp
 Restart=always
+RestartSec=1
+StartLimitInterval=1
 
 [Install]
 Alias=multi-user.target.wants/isoblue@2.service

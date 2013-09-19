@@ -155,6 +155,7 @@ static struct argp_option options[] = {
 	{ 0 }
 };
 struct arguments {
+	char *file;
 	char **ifaces;
 	int nifaces;
 	int channel;
