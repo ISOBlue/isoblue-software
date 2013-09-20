@@ -91,7 +91,6 @@ struct isobus_mesg {
 #define ISOBUS_PGN_COMMANDED_ADDR	65240LU
 /* Ancillary data */
 enum {
-	CAN_ISOBUS_SADDR,
 	CAN_ISOBUS_DADDR,
 };
 

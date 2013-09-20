@@ -300,13 +300,13 @@ int main(int argc, char *argv[]) {
 			addr_len = sizeof(addr);
 			if(recvmsg(s[i], &msg, 0) != -1) {
 				/* Get saddr */
-				struct sockaddr_can saddr;
+				struct sockaddr_can daddr;
 				struct cmsghdr *cmsg;
 				for(cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
 						cmsg = CMSG_NXTHDR(&msg, cmsg)) {
 					if(cmsg->cmsg_level == SOL_CAN_ISOBUS &&
-							cmsg->cmsg_type == CAN_ISOBUS_SADDR) {
-						saddr = *(struct sockaddr_can *)CMSG_DATA(cmsg);
+							cmsg->cmsg_type == CAN_ISOBUS_DADDR) {
+						daddr = *(struct sockaddr_can *)CMSG_DATA(cmsg);
 					}
 				}
 
@@ -333,7 +333,7 @@ int main(int argc, char *argv[]) {
 						"%ld.%06ld %2x %2x",
 						ts.tv_sec, ts.tv_usec,
 						addr.can_addr.isobus.addr,
-						saddr.can_addr.isobus.addr);
+						daddr.can_addr.isobus.addr);
 
 				ring_buffer_tail_advance(&buf, chars);
 				*(char *)ring_buffer_tail_address(&buf) = '\n';
