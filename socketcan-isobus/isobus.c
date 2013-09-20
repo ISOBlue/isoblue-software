@@ -279,12 +279,15 @@ static void isobus_rcv(struct sk_buff *oskb, void *data)
 	 *  containing the interface index.
 	 */
 
-	BUILD_BUG_ON(sizeof(skb->cb) < sizeof(struct sockaddr_can));
+	BUILD_BUG_ON(sizeof(skb->cb) < (2 * sizeof(struct sockaddr_can)));
 	addr = (struct sockaddr_can *)skb->cb;
-	memset(addr, 0, sizeof(*addr));
-	addr->can_family  = AF_CAN;
-	addr->can_ifindex = skb->dev->ifindex;
-	addr->can_addr.isobus.addr = ID_FIELD(cf->can_id, SA);
+	memset(addr, 0, 2 * sizeof(*addr));
+	addr[0].can_family  = AF_CAN;
+	addr[0].can_ifindex = skb->dev->ifindex;
+	addr[0].can_addr.isobus.addr = ID_FIELD(cf->can_id, SA);
+	addr[1].can_family  = AF_CAN;
+	addr[1].can_ifindex = skb->dev->ifindex;
+	addr[1].can_addr.isobus.addr = ID_FIELD(cf->can_id, PS);
 
 	/* add CAN specific message flags for isobus_recvmsg() */
 	pflags = isobus_flags(skb);
@@ -828,6 +831,12 @@ static inline int isobus_filter_conv(struct isobus_filter *fi,
 		if(fi[i].inverted) {
 			f[i].can_id |= CAN_INV_FILTER;
 		}
+
+		printk(KERN_DEBUG "can_isobus: %x&%x %x&%x %x&%x | %x&%x\n",
+				fi[i].pgn, fi[i].pgn_mask,
+				fi[i].daddr, fi[i].daddr_mask,
+				fi[i].saddr, fi[i].saddr_mask,
+				f[i].can_id, f[i].can_mask);
 	}
 
 	return 0;
@@ -869,7 +878,7 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 			err = isobus_filter_conv(ifilter, filter, count);
 			kfree(ifilter);
 		} else if (count == 1) {
-			if (copy_from_user(&sifilter, optval, sizeof(sfilter)))
+			if (copy_from_user(&sifilter, optval, sizeof(sifilter)))
 				return -EFAULT;
 
 			/* Interpret ISOBUS filter */
@@ -1030,6 +1039,7 @@ static int isobus_recvmsg(struct kiocb *iocb, struct socket *sock,
 {
 	struct sock *sk = sock->sk;
 	struct isobus_sock *ro = isobus_sk(sk);
+	struct sockaddr_can *addr;
 	struct sk_buff *skb;
 	int err = 0;
 	int noblock;
@@ -1045,6 +1055,7 @@ static int isobus_recvmsg(struct kiocb *iocb, struct socket *sock,
 	if (!skb) {
 		return err;
 	}
+	addr = (struct sockaddr_can *)skb->cb;
 
 	if (size < CAN_MTU)
 		msg->msg_flags |= MSG_TRUNC;
@@ -1060,12 +1071,12 @@ static int isobus_recvmsg(struct kiocb *iocb, struct socket *sock,
 	sock_recv_ts_and_drops(msg, sk, skb);
 
 	/* Create ancillary header with the source CAN address */
-	put_cmsg(msg, SOL_CAN_ISOBUS,  CAN_ISOBUS_SADDR,
-			sizeof(struct sockaddr_can), skb->cb);
+	put_cmsg(msg, SOL_CAN_ISOBUS,  CAN_ISOBUS_DADDR,
+			sizeof(struct sockaddr_can), &addr[1]);
  
 	if (msg->msg_name) {
 		msg->msg_namelen = sizeof(struct sockaddr_can);
-		memcpy(msg->msg_name, skb->cb, msg->msg_namelen);
+		memcpy(msg->msg_name, &addr[0], msg->msg_namelen);
 	}
 
 	/* assign the flags that have been recorded in isobus_rcv() */

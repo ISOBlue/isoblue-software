@@ -2,10 +2,12 @@
 
 [Unit]
 Description=Bring CAN Interfaces Up
-After=sysinit.target
+After=sys-subsystem-net-devices-ib_eng.device sys-subsystem-net-devices-ib_imp.device
+Requires=sys-subsystem-net-devices-ib_eng.device sys-subsystem-net-devices-ib_imp.device
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStartPre=/sbin/ifconfig ib_eng down
 ExecStartPre=/sbin/ifconfig ib_imp down
 ExecStart=/bin/ip link set ib_eng type can bitrate 250000

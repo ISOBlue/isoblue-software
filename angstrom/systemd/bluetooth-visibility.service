@@ -2,8 +2,8 @@
 
 [Unit]
 Description=Set Bluetooth Visibility On
-After=bluetooth.service
-Requires=bluetooth.service
+After=bluetooth.service sys-subsystem-bluetooth-devices-hci0.device
+Requires=bluetooth.service sys-subsystem-bluetooth-devices-hci0.device
 
 [Service]
 Type=oneshot
