@@ -118,6 +118,7 @@ passwd: password updated successfully
 There are a few packages needed to get the files, and to compile them.
 The following commands will install and configure them.
 ```shell
+# opkg update
 # opkg install wget git kernel-dev
 # make -C /usr/src/kernel scripts
 # ln -fs /usr/src/kernel /lib/modules/`uname -r`/build
@@ -243,7 +244,7 @@ Replace `DEVICE` with the CAN device to use
 Replace `[ADDR]` with a preferred address for the program to claim,
 or leave it out to self configure.
 ```shell
-$ ~/isoblue-software/tool/sc_mod_test DEVICE [ADDR]
+$ ~/isoblue-software/tools/sc_mod_test DEVICE [ADDR]
 ```
 The program sends a request PGN then listens for messages,
 printing any it sees to the terminal.
