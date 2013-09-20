@@ -272,13 +272,14 @@ int main(int argc, char *argv[]) {
 	}
 
 	while(1) {
-		if(select(n_read_fds + 1, &read_fds, NULL, NULL, NULL) < 0) {
+		fd_set tmp_fds = read_fds;
+		if(select(n_read_fds + 1, &tmp_fds, NULL, NULL, NULL) < 0) {
 		   perror("select");
 		   return EXIT_FAILURE;
 		}
 
 		for(i = 0; i < ns; i++) {
-			if(!FD_ISSET(s[i], &read_fds)) {
+			if(!FD_ISSET(s[i], &tmp_fds)) {
 				continue;
 			}
 
