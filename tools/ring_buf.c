@@ -292,6 +292,8 @@ void ring_buffer_clear(struct ring_buffer *buffer)
 	lseek(buffer->fd, -FOOTER_LEN, SEEK_END);
 	write(buffer->fd, &buffer->head_offset, sizeof(buffer->head_offset));
 	write(buffer->fd, &buffer->tail_offset, sizeof(buffer->tail_offset));
+
+	pthread_cond_broadcast(&buffer->unread_cond);
 }
 
 /* 
