@@ -146,7 +146,7 @@ int *s;
 struct ring_buffer buf;
 
 /* argp goodies */
-const char *argp_program_version = "isoblued 0.2.1";
+const char *argp_program_version = "isoblued 0.2.1" "\n" BUILD_NUM;
 const char *argp_program_bug_address = "<bugs@isoblue.org>";
 static char doc[] = "ISOBlue Daemon -- communicates with libISOBlue";
 static char args_doc[] = "BUF_FILE [IFACE]...";

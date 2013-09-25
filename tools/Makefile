@@ -5,6 +5,8 @@ CFLAGS := -Wall -g
 
 all : $(TOOLS) $(TEST)
 
+include ../buildnum.mk
+
 isoblued : LDLIBS += -lbluetooth -lpthread
 isoblued : ring_buf.o
 
@@ -13,5 +15,5 @@ install : $(TOOLS:%=install_%)
 install_% :
 	install $* $(PREFIX)/bin/$*
 
-clean :
+clean ::
 	-$(RM) $(TOOLS) $(TEST) *.o

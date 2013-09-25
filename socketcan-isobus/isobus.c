@@ -67,6 +67,9 @@ MODULE_AUTHOR("Alex Layton <awlayton@purdue.edu>, "
 		"Urs Thuermann <urs.thuermann@volkswagen.de>, "
 		"Oliver Hartkopp <oliver.hartkopp@volkswagen.de>");
 MODULE_ALIAS("can-proto-" __stringify(CAN_ISOBUS));
+#ifdef BUILD_NUM
+	MODULE_INFO(build, BUILD_NUM);
+#endif
 
 #define ISOBUS_MIN_SC_ADDR	128U
 #define ISOBUS_MAX_SC_ADDR	247U
