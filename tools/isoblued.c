@@ -146,7 +146,7 @@ int *s;
 struct ring_buffer buf;
 
 /* argp goodies */
-const char *argp_program_version = "isoblued 0.2.1" "\n" BUILD_NUM;
+const char *argp_program_version = "isoblued 0.2.2" "\n" BUILD_NUM;
 const char *argp_program_bug_address = "<bugs@isoblue.org>";
 static char doc[] = "ISOBlue Daemon -- communicates with libISOBlue";
 static char args_doc[] = "BUF_FILE [IFACE]...";
@@ -330,7 +330,7 @@ int main(int argc, char *argv[]) {
 				}
 
 				chars += sprintf(ring_buffer_tail_address(&buf) + chars,
-						"%ld.%06ld %2x %2x",
+						"%ld.%06ld %02x %02x",
 						ts.tv_sec, ts.tv_usec,
 						addr.can_addr.isobus.addr,
 						daddr.can_addr.isobus.addr);
@@ -401,9 +401,16 @@ void *send_func(void *ptr)
 		mesg[chars++] = '\n';
 		if(send(rc, mesg, chars, 0) < 0) {
 			perror("send");
-			pthread_cancel(command_thread);
-			close(rc);
-			break;
+
+			switch(errno) {
+			case EAGAIN:
+				continue;
+
+			default:
+				pthread_cancel(command_thread);
+				close(rc);
+				return;
+			}
 		}
 
 		mesg[chars-1] = '\0';
