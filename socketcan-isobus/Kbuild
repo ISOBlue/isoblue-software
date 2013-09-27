@@ -5,5 +5,10 @@ can-y	:= patched/af_can.o patched/proc.o
 obj-m	+= can-isobus.o
 can-isobus-y	:= isobus.o
 
+
 # Put debug symbols in the modules
 ccflags-y += -g
+
+ifdef BUILD_NUM
+	ccflags-y += -DBUILD_NUM='"$(BUILD_NUM)"'
+endif

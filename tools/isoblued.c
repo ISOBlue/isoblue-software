@@ -146,12 +146,13 @@ int *s;
 struct ring_buffer buf;
 
 /* argp goodies */
-const char *argp_program_version = "isoblued 0.2";
+const char *argp_program_version = "isoblued 0.2.2" "\n" BUILD_NUM;
 const char *argp_program_bug_address = "<bugs@isoblue.org>";
 static char doc[] = "ISOBlue Daemon -- communicates with libISOBlue";
 static char args_doc[] = "BUF_FILE [IFACE]...";
 static struct argp_option options[] = {
-	{"channel", 'c', "CHANNEL", 0, "RFCOMM Channel", 0},
+	{"channel", 'c', "<channel>", 0, "RFCOMM Channel", 0},
+	{"buffer-order", 'b', "<order>", 0, "Use a 2^<order> MB buffer", 0},
 	{ 0 }
 };
 struct arguments {
@@ -159,6 +160,7 @@ struct arguments {
 	char **ifaces;
 	int nifaces;
 	int channel;
+	int buf_order;
 };
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 	struct arguments *arguments = state->input;
@@ -166,6 +168,10 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 	switch(key) {
 	case 'c':
 		arguments->channel = atoi(arg);
+		break;
+
+	case 'b':
+		arguments->buf_order = atoi(arg);
 		break;
 
 	case ARGP_KEY_ARG:
@@ -212,6 +218,7 @@ int main(int argc, char *argv[]) {
 		DEF_IFACES,
 		sizeof(DEF_IFACES) / sizeof(*DEF_IFACES),
 		0,
+		0,
 	};
 	argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
@@ -242,7 +249,7 @@ int main(int argc, char *argv[]) {
 
 	session = register_service(rc_addr.rc_channel);
 
-	ring_buffer_create(&buf, 15, arguments.file);
+	ring_buffer_create(&buf, 20 + arguments.buf_order, arguments.file);
 	if(pthread_create(&bt_thread, NULL, bt_func, NULL) != 0) {
 		perror("bt_thread");
 		exit(EXIT_FAILURE);
@@ -330,7 +337,7 @@ int main(int argc, char *argv[]) {
 				}
 
 				chars += sprintf(ring_buffer_tail_address(&buf) + chars,
-						"%ld.%06ld %2x %2x",
+						"%ld.%06ld %02x %02x",
 						ts.tv_sec, ts.tv_usec,
 						addr.can_addr.isobus.addr,
 						daddr.can_addr.isobus.addr);
@@ -356,7 +363,10 @@ void *bt_func(void *ptr)
 		socklen_t len;
 
 		len = sizeof(addr);
-		rc = accept(bt, (struct sockaddr *)&addr, &len);
+		if((rc = accept(bt, (struct sockaddr *)&addr, &len)) < 0) {
+			perror("accept");
+			continue;
+		}
 
 		if(pthread_create(&send_thread, NULL, send_func, NULL) != 0) {
 			perror("send_thread");
@@ -369,8 +379,6 @@ void *bt_func(void *ptr)
 
 		pthread_join(command_thread, NULL);
 		pthread_join(send_thread, NULL);
-
-		close(rc);
 	}
 
 	return NULL;
@@ -378,6 +386,10 @@ void *bt_func(void *ptr)
 
 void *send_func(void *ptr)
 {
+	printf("send thread entered\n");
+	pthread_cleanup_push((void (*)(void *)) printf,
+			"send thread exited\n");
+
 	while(1) {
 		int chars;
 		char *mesg;
@@ -386,28 +398,46 @@ void *send_func(void *ptr)
 		ring_buffer_wait_unread_bytes(&buf);
 		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
-		sscanf(ring_buffer_curs_address(&buf),
-				"\n%m[^\n]%n\n", &mesg, &chars);
+		if(sscanf(ring_buffer_curs_address(&buf),
+				"\n%m[^\n]\n", &mesg) != 1) {
+			perror("sscanf");
+			continue;
+		}
+		chars = strlen(mesg);
 
-		mesg[chars] = '\n';
-		chars++;
-
+		mesg[chars++] = '\n';
 		if(send(rc, mesg, chars, 0) < 0) {
 			perror("send");
-			pthread_cancel(command_thread);
-			break;
+
+			switch(errno) {
+			case EAGAIN:
+				continue;
+
+			default:
+				pthread_cancel(command_thread);
+				close(rc);
+				return;
+			}
 		}
+
+		mesg[chars-1] = '\0';
 		printf("%s\n", mesg);
 
 		ring_buffer_curs_advance(&buf, chars);
 		free(mesg);
 	}
 
+	pthread_cleanup_pop(1);
+
 	return NULL;
 }
 void *command_func(void *ptr)
 {
 	FILE *fp;
+
+	printf("command thread entered\n");
+	pthread_cleanup_push((void (*)(void *)) printf,
+			"command thread exited\n");
 
 	fp = fdopen(rc, "r");
 	setvbuf(fp, NULL, _IONBF, 0);
@@ -421,6 +451,7 @@ void *command_func(void *ptr)
 		if(fscanf(fp, "%c %m[^\n\r]%*1[\n\r]", &op, &args) != 2) {
 			perror("fscanf");
 			pthread_cancel(send_thread);
+			close(rc);
 			break;
 		}
 		printf("op %c, %s\n", op, args);
@@ -514,6 +545,8 @@ void *command_func(void *ptr)
 	}
 
 	fclose(fp);
+
+	pthread_cleanup_pop(1);
 
 	return NULL;
 }
