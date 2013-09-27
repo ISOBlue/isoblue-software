@@ -151,7 +151,8 @@ const char *argp_program_bug_address = "<bugs@isoblue.org>";
 static char doc[] = "ISOBlue Daemon -- communicates with libISOBlue";
 static char args_doc[] = "BUF_FILE [IFACE]...";
 static struct argp_option options[] = {
-	{"channel", 'c', "CHANNEL", 0, "RFCOMM Channel", 0},
+	{"channel", 'c', "<channel>", 0, "RFCOMM Channel", 0},
+	{"buffer-order", 'b', "<order>", 0, "Use a 2^<order> MB buffer", 0},
 	{ 0 }
 };
 struct arguments {
@@ -159,6 +160,7 @@ struct arguments {
 	char **ifaces;
 	int nifaces;
 	int channel;
+	int buf_order;
 };
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 	struct arguments *arguments = state->input;
@@ -166,6 +168,10 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 	switch(key) {
 	case 'c':
 		arguments->channel = atoi(arg);
+		break;
+
+	case 'b':
+		arguments->buf_order = atoi(arg);
 		break;
 
 	case ARGP_KEY_ARG:
@@ -212,6 +218,7 @@ int main(int argc, char *argv[]) {
 		DEF_IFACES,
 		sizeof(DEF_IFACES) / sizeof(*DEF_IFACES),
 		0,
+		0,
 	};
 	argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
@@ -242,7 +249,7 @@ int main(int argc, char *argv[]) {
 
 	session = register_service(rc_addr.rc_channel);
 
-	ring_buffer_create(&buf, 15, arguments.file);
+	ring_buffer_create(&buf, 20 + arguments.buf_order, arguments.file);
 	if(pthread_create(&bt_thread, NULL, bt_func, NULL) != 0) {
 		perror("bt_thread");
 		exit(EXIT_FAILURE);
