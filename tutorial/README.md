@@ -119,7 +119,7 @@ There are a few packages needed to get the files, and to compile them.
 The following commands will install and configure them.
 ```shell
 # opkg update
-# opkg install wget git kernel-dev
+# opkg install wget git kernel-dev bluez4-dev
 # make -C /usr/src/kernel scripts
 # ln -fs /usr/src/kernel /lib/modules/`uname -r`/build
 ```
@@ -216,6 +216,11 @@ $ cd ~/isoblue-software/angstrom
 # systemctl enable isoblue.target
 # cp udev/* /etc/udev/rules.d/
 ```
+
+## Android Library ##
+ISOBlue is intended to be used with and Anrdoid library.
+That library along with its source code, description, and usage is [here][lib].
+[lib]: https://github.com/ISOBlue/isoblue-android/tree/master/libISOBlue "libISOBlue"
  
 ## Usage Examples ##
 
@@ -249,23 +254,4 @@ $ ~/isoblue-software/tools/sc_mod_test DEVICE [ADDR]
 The program sends a request PGN then listens for messages,
 printing any it sees to the terminal.
 [sc_mod_test]: ../tools/sc_mod_test.c "ISOBUS SocketCAN Module Test"
-
-### Messages Over Bluetooth ###
-The Android library is not yet in a demo ready state,
-however it still is possible to receive ISOBUS messages over Bluetooth.
-ISOBlue can be made to connect to the Android App [BlueTerm][blueterm].
-The following commands must be run to change the configuration.
-```shell
-# systemctl stop can-log@1.service
-# systemctl start isoblue@1.serivce
-```
-After running those commands,
-you can connect to ISOBlue with BlueTerm.
-The device name of ISOBlue is *beaglebone-0*.
-Once connected, BlueTerm will receive any ISOBUS messages seen by ISOBlue.
-[blueterm]: https://play.google.com/store/apps/details?id=es.pymasde.blueterm
-
-If you want to generate some messages to see on Android,
-you can run `sc_mod_test` on ISOBlue (see previous section).
-The program generates a few messages when it starts up.
 
