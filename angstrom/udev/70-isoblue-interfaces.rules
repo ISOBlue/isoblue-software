@@ -1,7 +1,7 @@
 # /etc/udev/rules.d/70-isoblue-interfaces.rules
 
 # CAN interface on engine bus
-KERNEL=="can[0-9]*", KERNELS=="spi1.0", NAME="ib_eng"
+KERNEL=="can[0-9]*", KERNELS=="spi1.1", NAME="ib_eng"
 
 # CAN interface on implement bus
-KERNEL=="can[0-9]*", KERNELS=="spi1.1", NAME="ib_imp"
+KERNEL=="can[0-9]*", KERNELS=="spi1.0", NAME="ib_imp"
