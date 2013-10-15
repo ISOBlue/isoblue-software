@@ -29,9 +29,11 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
 #include <argp.h>
+#include <limits.h>
  
 #include <net/if.h>
 #include <sys/types.h>
@@ -47,30 +49,12 @@
 #include "../socketcan-isobus/patched/can.h"
 #include "../socketcan-isobus/isobus.h"
 
-#include <pthread.h>
-
 #include "ring_buf.h"
 
 enum opcode {
 	SET_FILTERS = 'F',
 	SEND_MESG = 'W',
 };
- 
-void print_message(char interface[], struct timeval *ts, 
-		struct isobus_mesg *mes) {
-	int i;
-
-	/* Output CAN message */
-	printf("%06d ", mes->pgn);
-	for(i = 0; i < mes->dlen; i++) {
-		printf(" %02x", mes->data[i]);
-	}
-	/* Output timestamp and CAN interface */
-	printf("\t%ld.%06ld\t%s\n", ts->tv_sec, ts->tv_usec, interface);
-
-	/* Flush output after each message */
-	fflush(stdout);
-}
 
 sdp_session_t *register_service(uint8_t rfcomm_channel)
 {
@@ -86,67 +70,62 @@ sdp_session_t *register_service(uint8_t rfcomm_channel)
                *root_list = 0,
                *proto_list = 0, 
                *access_proto_list = 0;
-    sdp_data_t *channel = 0, *psm = 0;
+    sdp_data_t *channel = 0;
 
     sdp_record_t *record = sdp_record_alloc();
 
-    // set the general service ID
-    sdp_uuid128_create( &svc_uuid, &service_uuid_int );
-    sdp_set_service_id( record, svc_uuid );
+    /* set the general service ID */
+    sdp_uuid128_create(&svc_uuid, &service_uuid_int);
+    sdp_set_service_id(record, svc_uuid);
 
-    // make the service record publicly browsable
+    /* make the service record publicly browsable */
     sdp_uuid16_create(&root_uuid, PUBLIC_BROWSE_GROUP);
     root_list = sdp_list_append(0, &root_uuid);
-    sdp_set_browse_groups( record, root_list );
+    sdp_set_browse_groups(record, root_list);
 
-    // set l2cap information
+    /* set l2cap information */
     sdp_uuid16_create(&l2cap_uuid, L2CAP_UUID);
-    l2cap_list = sdp_list_append( 0, &l2cap_uuid );
-    proto_list = sdp_list_append( 0, l2cap_list );
+    l2cap_list = sdp_list_append(0, &l2cap_uuid);
+    proto_list = sdp_list_append(0, l2cap_list);
 
-    // set rfcomm information
+    /* set rfcomm information */
     sdp_uuid16_create(&rfcomm_uuid, RFCOMM_UUID);
     channel = sdp_data_alloc(SDP_UINT8, &rfcomm_channel);
-    rfcomm_list = sdp_list_append( 0, &rfcomm_uuid );
-    sdp_list_append( rfcomm_list, channel );
-    sdp_list_append( proto_list, rfcomm_list );
+    rfcomm_list = sdp_list_append(0, &rfcomm_uuid);
+    sdp_list_append(rfcomm_list, channel);
+    sdp_list_append(proto_list, rfcomm_list);
 
-    // attach protocol information to service record
-    access_proto_list = sdp_list_append( 0, proto_list );
-    sdp_set_access_protos( record, access_proto_list );
+    /* attach protocol information to service record */
+    access_proto_list = sdp_list_append(0, proto_list);
+    sdp_set_access_protos(record, access_proto_list);
 
-    // set the name, provider, and description
+    /* set the name, provider, and description */
     sdp_set_info_attr(record, service_name, service_prov, service_dsc);
 
-	int err = 0;
+    /* connect to the local SDP server, register the service record, and
+    disconnect */
     sdp_session_t *session = 0;
+    session = sdp_connect(BDADDR_ANY, BDADDR_LOCAL, SDP_RETRY_IF_BUSY);
+    if(sdp_record_register(session, record, 0) < 0) {
+		perror("sdp_record_register");
+		exit(EXIT_FAILURE);
+	}
 
-    // connect to the local SDP server, register the service record, and 
-    // disconnect
-    session = sdp_connect( BDADDR_ANY, BDADDR_LOCAL, SDP_RETRY_IF_BUSY );
-    err = sdp_record_register(session, record, 0);
-
-    // cleanup
-    sdp_data_free( channel );
-    sdp_list_free( l2cap_list, 0 );
-    sdp_list_free( rfcomm_list, 0 );
-    sdp_list_free( root_list, 0 );
-    sdp_list_free( access_proto_list, 0 );
+    /* cleanup */
+    sdp_data_free(channel);
+    sdp_list_free(l2cap_list, 0);
+    sdp_list_free(rfcomm_list, 0);
+    sdp_list_free(root_list, 0);
+    sdp_list_free(access_proto_list, 0);
 
     return session;
 }
 
-void *bt_func(void *);
-void *send_func(void *);
-void *command_func(void *);
-
-int bt, rc;
-int ns;
-int *s;
-struct ring_buffer buf;
+int send_func(int rc, struct ring_buffer *buf);
+int command_func(int rc, struct ring_buffer *buf, int *s);
 
 /* argp goodies */
-const char *argp_program_version = "isoblued 0.2.2" "\n" BUILD_NUM;
+const char *argp_program_version = "isoblued 0.3.0" "\n" BUILD_NUM;
 const char *argp_program_bug_address = "<bugs@isoblue.org>";
 static char doc[] = "ISOBlue Daemon -- communicates with libISOBlue";
 static char args_doc[] = "BUF_FILE [IFACE]...";
@@ -196,20 +175,22 @@ static struct argp argp = {options, parse_opt, args_doc, doc};
 
 int main(int argc, char *argv[]) {
 	struct sockaddr_can addr = { 0 };
-	socklen_t addr_len;
 	struct isobus_mesg mes = { 0 };
 	struct ifreq ifr;
 	struct timeval ts;
 	int i;
-	fd_set read_fds;
-	int n_read_fds; 
 
-	pthread_t bt_thread;
-	char byte;
+	fd_set read_fds, write_fds;
+	int n_fds; 
 
 	struct sockaddr_rc rc_addr = { 0 };
 	socklen_t len;
 	sdp_session_t *session;
+
+	int bt, rc = -1;
+	int ns;
+	int *s;
+	struct ring_buffer buf;
 
 	/* Handle options */
 	#define DEF_IFACES	((char*[]) {"ib_eng", "ib_imp"})
@@ -225,17 +206,17 @@ int main(int argc, char *argv[]) {
 	s = calloc(arguments.nifaces, sizeof(*s));
 	ns = arguments.nifaces;
 	FD_ZERO(&read_fds);
-	n_read_fds = 0;
+	FD_ZERO(&write_fds);
+	n_fds = 0;
 
-	if((bt = socket(PF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM)) < 0) {
+	if((bt = socket(PF_BLUETOOTH, SOCK_STREAM | SOCK_NONBLOCK, BTPROTO_RFCOMM))
+			< 0) {
 		perror("socket (bt)");
 		return EXIT_FAILURE;
 	}
-	n_read_fds = bt > n_read_fds ? bt : n_read_fds;
 	rc_addr.rc_family = AF_BLUETOOTH;
 	rc_addr.rc_bdaddr = *BDADDR_ANY;
 	rc_addr.rc_channel = arguments.channel;
-
 	if(bind(bt, (struct sockaddr *)&rc_addr, sizeof(rc_addr)) < 0) {
 		perror("bind bt");
 		return EXIT_FAILURE;
@@ -246,18 +227,17 @@ int main(int argc, char *argv[]) {
 		perror("getsockname");
 		return EXIT_FAILURE;
 	}
+	FD_SET(bt, &read_fds);
+	n_fds = bt > n_fds ? bt : n_fds;
 
 	session = register_service(rc_addr.rc_channel);
 
 	ring_buffer_create(&buf, 20 + arguments.buf_order, arguments.file);
-	if(pthread_create(&bt_thread, NULL, bt_func, NULL) != 0) {
-		perror("bt_thread");
-		exit(EXIT_FAILURE);
-	}
 
 	/* Initialize ISOBUS sockets */
 	for(i = 0; i < arguments.nifaces; i++) {
-		if((s[i] = socket(PF_CAN, SOCK_DGRAM, CAN_ISOBUS)) < 0) {
+		if((s[i] = socket(PF_CAN, SOCK_DGRAM | SOCK_NONBLOCK, CAN_ISOBUS))
+				< 0) {
 			perror("socket (can)");
 			return EXIT_FAILURE;
 		}
@@ -275,18 +255,19 @@ int main(int argc, char *argv[]) {
 		}
 
 		FD_SET(s[i], &read_fds);
-		n_read_fds = s[i] > n_read_fds ? s[i] : n_read_fds;
+		n_fds = s[i] > n_fds ? s[i] : n_fds;
 	}
 
 	while(1) {
-		fd_set tmp_fds = read_fds;
-		if(select(n_read_fds + 1, &tmp_fds, NULL, NULL, NULL) < 0) {
+		fd_set tmp_rfds = read_fds, tmp_wfds = write_fds;
+		if(select(n_fds + 1, &tmp_rfds, &tmp_wfds, NULL, NULL) < 0) {
 		   perror("select");
 		   return EXIT_FAILURE;
 		}
 
+		/* Read ISOBUS */
 		for(i = 0; i < ns; i++) {
-			if(!FD_ISSET(s[i], &tmp_fds)) {
+			if(!FD_ISSET(s[i], &tmp_rfds)) {
 				continue;
 			}
 
@@ -304,7 +285,6 @@ int main(int argc, char *argv[]) {
 			iov.iov_base = &mes;
 			iov.iov_len = sizeof(mes);
 
-			addr_len = sizeof(addr);
 			if(recvmsg(s[i], &msg, 0) != -1) {
 				/* Get saddr */
 				struct sockaddr_can daddr;
@@ -350,204 +330,214 @@ int main(int argc, char *argv[]) {
 				perror("recvmsg");
 			}
 		}
+
+		/* Accept Bluetooth connection */
+		if(FD_ISSET(bt, &tmp_rfds)) {
+			if((rc = accept(bt, NULL, NULL)) < 0) {
+				perror("accept");
+			} else {
+				FD_SET(rc, &read_fds);
+				FD_SET(rc, &write_fds);
+				n_fds = rc > n_fds ? rc : n_fds;
+				FD_CLR(bt, &read_fds);
+			}
+		}
+
+		/* Check RFCOMM connection */
+		if(rc > 0) {
+			/* Read RFCOMM */
+			if(FD_ISSET(rc, &tmp_rfds)) {
+				if(command_func(rc, &buf, s) < 0) {
+					FD_CLR(rc, &read_fds);
+					FD_CLR(rc, &write_fds);
+					FD_SET(bt, &read_fds);
+					close(rc);
+					rc = -1;
+				}
+			}
+
+			/* Write RFCOMM */
+			if(FD_ISSET(rc, &tmp_wfds)) {
+				if(send_func(rc, &buf) < 0) {
+					FD_CLR(rc, &read_fds);
+					FD_CLR(rc, &write_fds);
+					FD_SET(bt, &read_fds);
+					close(rc);
+					rc = -1;
+				}
+			}
+
+			/* Check send buffer */
+			if(ring_buffer_unread_bytes(&buf)) {
+				FD_SET(rc, &write_fds);
+			} else {
+				FD_CLR(rc, &write_fds);
+			}
+		}
 	}
+
+	sdp_close(session);
 
 	return EXIT_SUCCESS;
 }
 
-pthread_t send_thread, command_thread;
-void *bt_func(void *ptr)
+int send_func(int rc, struct ring_buffer *buf)
 {
-	while(1) {
-		struct sockaddr_rc addr = { 0 };
-		socklen_t len;
+	int chars;
+	char *mesg;
 
-		len = sizeof(addr);
-		if((rc = accept(bt, (struct sockaddr *)&addr, &len)) < 0) {
-			perror("accept");
-			continue;
-		}
+	if(sscanf(ring_buffer_curs_address(buf),
+			"\n%m[^\n]\n", &mesg) != 1) {
+		perror("sscanf");
+		return 0;
+	}
+	chars = strlen(mesg);
 
-		if(pthread_create(&send_thread, NULL, send_func, NULL) != 0) {
-			perror("send_thread");
-			exit(EXIT_FAILURE);
-		}
-		if(pthread_create(&command_thread, NULL, command_func, NULL) != 0) {
-			perror("command_thread");
-			exit(EXIT_FAILURE);
-		}
+	mesg[chars++] = '\n';
+	if(send(rc, mesg, chars, 0) < 0) {
+		perror("send");
 
-		pthread_join(command_thread, NULL);
-		pthread_join(send_thread, NULL);
+		switch(errno) {
+		case EAGAIN:
+			return 0;
+
+		default:
+			return -1;
+		}
 	}
 
-	return NULL;
+	mesg[chars-1] = '\0';
+	printf("%s\n", mesg);
+
+	ring_buffer_curs_advance(buf, chars);
+	free(mesg);
+
+	return 1;
 }
 
-void *send_func(void *ptr)
+int command_func(int rc, struct ring_buffer *buf, int *s)
 {
-	printf("send thread entered\n");
-	pthread_cleanup_push((void (*)(void *)) printf,
-			"send thread exited\n");
+	/* Buffer for reassembling commands */
+	#define CMD_BUF_SIZE	0x01FFFF
+	static char buffer[CMD_BUF_SIZE] = { 0 };
+	static int curs = 0, tail = 0;
 
-	while(1) {
-		int chars;
-		char *mesg;
-
-		pthread_setcancelstate(PTHREAD_CANCEL_DEFERRED, NULL);
-		ring_buffer_wait_unread_bytes(&buf);
-		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-
-		if(sscanf(ring_buffer_curs_address(&buf),
-				"\n%m[^\n]\n", &mesg) != 1) {
-			perror("sscanf");
-			continue;
-		}
-		chars = strlen(mesg);
-
-		mesg[chars++] = '\n';
-		if(send(rc, mesg, chars, 0) < 0) {
-			perror("send");
-
-			switch(errno) {
-			case EAGAIN:
-				continue;
-
-			default:
-				pthread_cancel(command_thread);
-				close(rc);
-				return;
-			}
-		}
-
-		mesg[chars-1] = '\0';
-		printf("%s\n", mesg);
-
-		ring_buffer_curs_advance(&buf, chars);
-		free(mesg);
+	int chars;
+	chars = read(rc, buffer+tail, INT_MAX-tail);
+	if(chars < 0) {
+		perror("read");
+		return -1;
 	}
+	tail += chars;
 
-	pthread_cleanup_pop(1);
-
-	return NULL;
-}
-void *command_func(void *ptr)
-{
-	FILE *fp;
-
-	printf("command thread entered\n");
-	pthread_cleanup_push((void (*)(void *)) printf,
-			"command thread exited\n");
-
-	fp = fdopen(rc, "r");
-	setvbuf(fp, NULL, _IONBF, 0);
-	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-
-	while(1) {
-		char op;
-		char *args;
-
-		pthread_testcancel();
-		if(fscanf(fp, "%c %m[^\n\r]%*1[\n\r]", &op, &args) != 2) {
-			perror("fscanf");
-			pthread_cancel(send_thread);
-			close(rc);
-			break;
-		}
-		printf("op %c, %s\n", op, args);
-
-		switch(op) {
-		case SET_FILTERS:
-		{
-			int sock;
-			int nchars;
-			char *p;
-			struct isobus_filter *filts;
-			int nfilts;
-
-			sscanf(args, "%d %d %n", &sock, &nfilts, &nchars);
-			p = args + nchars;
-
-			if(nfilts == 0) {
-				/* Receive everything when 0 filters given */
-				nfilts = 1;
-				filts = malloc(sizeof(*filts));
-
-				filts[0].pgn = 0;
-				filts[0].pgn_mask = 0;
-				filts[0].daddr = 0;
-				filts[0].daddr_mask = 0;
-				filts[0].saddr = 0;
-				filts[0].saddr_mask = 0;
-			} else {
-				filts = calloc(nfilts, sizeof(*filts));
-				memset(filts, 0, nfilts * sizeof(*filts));
-
-				int i;
-				for(i = 0; i < nfilts; i++) {
-					int pgn;
-
-					sscanf(p, "%d%n", &pgn, &nchars);
-					p += nchars;
-
-					filts[i].pgn = pgn;
-					filts[i].pgn_mask = CAN_ISOBUS_PGN_MASK;
-				}
-			}
-			if(setsockopt(s[sock], SOL_CAN_ISOBUS, CAN_ISOBUS_FILTER, filts,
-						nfilts * sizeof(*filts)) < 0) {
-				perror("setsockopt");
-			}
-
-			ring_buffer_clear(&buf);
-			free(filts);
+	bool done = false;
+	while(curs < tail) {
+		if(buffer[curs] == '\n' || buffer[curs] == '\r') {
+			done = true;
+			buffer[curs++] = '\0';
 			break;
 		}
 
-		case SEND_MESG:
-		{
-			int nchars;
-			char *p;
-			int pgn;
-			int len;
-			int dest;
-			int sock;
+		curs++;
+	}
+	if(!done) {
+		return 0;
+	}
 
-			sscanf(args, "%d %d %d %d %n", &sock, &dest, &pgn, &len, &nchars);
-			p = args + nchars;
+	char op;
+	char *args;
+	op = buffer[0];
+	args = buffer+2;
+	printf("op %c, %s\n", op, args);
+
+	switch(op) {
+	case SET_FILTERS:
+	{
+		int sock;
+		int nchars;
+		char *p;
+		struct isobus_filter *filts;
+		int nfilts;
+
+		sscanf(args, "%d %d %n", &sock, &nfilts, &nchars);
+		p = args + nchars;
+
+		if(nfilts == 0) {
+			/* Receive everything when 0 filters given */
+			nfilts = 1;
+			filts = malloc(sizeof(*filts));
+
+			filts[0].pgn = 0;
+			filts[0].pgn_mask = 0;
+			filts[0].daddr = 0;
+			filts[0].daddr_mask = 0;
+			filts[0].saddr = 0;
+			filts[0].saddr_mask = 0;
+		} else {
+			filts = calloc(nfilts, sizeof(*filts));
 
 			int i;
-			unsigned char *data;
-			data = calloc(len, sizeof(*data));
-			for(i = 0; i < len; i++) {
-				sscanf(p, "%2hhx%n", &data[i], &nchars);
+			for(i = 0; i < nfilts; i++) {
+				int pgn;
+
+				sscanf(p, "%d%n", &pgn, &nchars);
 				p += nchars;
+
+				filts[i].pgn = pgn;
+				filts[i].pgn_mask = CAN_ISOBUS_PGN_MASK;
 			}
-
-			struct isobus_mesg mesg = { 0 };
-			mesg.pgn = pgn;
-			mesg.dlen = len;
-			for(i = 0; i < len; i++)
-				mesg.data[i] = data[i];
-
-			struct sockaddr_can addr = { 0 };
-			addr.can_family = AF_CAN;
-			addr.can_addr.isobus.addr = dest;
-
-			sendto(s[sock], &mesg, sizeof(mesg), 0, (struct sockaddr *)&addr,
-					sizeof(addr));
-			
-			break;
 		}
+		if(setsockopt(s[sock], SOL_CAN_ISOBUS, CAN_ISOBUS_FILTER, filts,
+					nfilts * sizeof(*filts)) < 0) {
+			perror("setsockopt");
 		}
 
-		free(args);
+		ring_buffer_clear(buf);
+		free(filts);
+		break;
 	}
 
-	fclose(fp);
+	case SEND_MESG:
+	{
+		int nchars;
+		char *p;
+		int pgn;
+		int len;
+		int dest;
+		int sock;
 
-	pthread_cleanup_pop(1);
+		sscanf(args, "%d %d %d %d %n", &sock, &dest, &pgn, &len, &nchars);
+		p = args + nchars;
 
-	return NULL;
+		int i;
+		unsigned char *data;
+		data = calloc(len, sizeof(*data));
+		for(i = 0; i < len; i++) {
+			sscanf(p, "%2hhx%n", &data[i], &nchars);
+			p += nchars;
+		}
+
+		struct isobus_mesg mesg = { 0 };
+		mesg.pgn = pgn;
+		mesg.dlen = len;
+		for(i = 0; i < len; i++)
+			mesg.data[i] = data[i];
+
+		struct sockaddr_can addr = { 0 };
+		addr.can_family = AF_CAN;
+		addr.can_addr.isobus.addr = dest;
+
+		sendto(s[sock], &mesg, sizeof(mesg), 0, (struct sockaddr *)&addr,
+				sizeof(addr));
+		
+		break;
+	}
+	}
+	
+	memmove(buffer, buffer+curs, tail-curs);
+	tail -= curs;
+	curs = 0;
+
+	return 0;
 }
 

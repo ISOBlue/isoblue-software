@@ -87,8 +87,8 @@ int ring_buffer_create(struct ring_buffer *buffer, unsigned long order,
 	if(address != buffer->address + buffer->count_bytes)
 		return -1;
 
-	pthread_cond_init(&buffer->unread_cond, NULL);
-	pthread_mutex_init(&buffer->unread_mut, NULL);
+	/* pthread_cond_init(&buffer->unread_cond, NULL); */
+	/* pthread_mutex_init(&buffer->unread_mut, NULL); */
 
 	return buffer->fd;
 }
@@ -161,41 +161,41 @@ void *ring_buffer_curs_address(struct ring_buffer *buffer)
 
 void ring_buffer_seek_curs_head(struct ring_buffer *buffer)
 {
-	pthread_mutex_lock(&buffer->unread_mut);
-	pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
-			&buffer->unread_mut);
+	/* pthread_mutex_lock(&buffer->unread_mut); */
+	/* pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
+			&buffer->unread_mut); */
 
 	buffer->curs_offset = buffer->head_offset;
 
-	pthread_cond_broadcast(&buffer->unread_cond);
+	/* pthread_cond_broadcast(&buffer->unread_cond); */
 
-	pthread_cleanup_pop(1);
+	/* pthread_cleanup_pop(1); */
 }
 
 void ring_buffer_seek_curs_start(struct ring_buffer *buffer)
 {
-	pthread_mutex_lock(&buffer->unread_mut);
-	pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
-			&buffer->unread_mut);
+	/* pthread_mutex_lock(&buffer->unread_mut); */
+	/* pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
+			&buffer->unread_mut); */
 
 	buffer->curs_offset = buffer->start_offset;
 
-	pthread_cond_broadcast(&buffer->unread_cond);
+	/* pthread_cond_broadcast(&buf->unread_cond); */
 
-	pthread_cleanup_pop(1);
+	/* pthread_cleanup_pop(1); */
 }
 
 void ring_buffer_seek_curs_tail(struct ring_buffer *buffer)
 {
-	pthread_mutex_lock(&buffer->unread_mut);
-	pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
-			&buffer->unread_mut);
+	/* pthread_mutex_lock(&buffer->unread_mut); */
+	/* pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
+			&buffer->unread_mut); */
 
 	buffer->curs_offset = buffer->tail_offset;
 
-	pthread_cond_broadcast(&buffer->unread_cond);
-
-	pthread_cleanup_pop(1);
+	/* pthread_cond_broadcast(&buffer->unread_cond); */
+ 
+	/* pthread_cleanup_pop(1); */
 }
 
 static void _ring_buffer_curs_advance(struct ring_buffer *buffer,
@@ -214,19 +214,19 @@ static void _ring_buffer_curs_advance(struct ring_buffer *buffer,
 		buffer->curs_offset += count_bytes;
 	buffer->curs_offset = _buf_mod(buffer, buffer->curs_offset);
 
-	pthread_cond_broadcast(&buffer->unread_cond);
+	/* pthread_cond_broadcast(&buffer->unread_cond); */
 }
 
 void ring_buffer_curs_advance(struct ring_buffer *buffer,
 		unsigned long count_bytes)
 {
-	pthread_mutex_lock(&buffer->unread_mut);
-	pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
-			&buffer->unread_mut);
+	/* pthread_mutex_lock(&buffer->unread_mut); */
+	/* pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
+			&buffer->unread_mut); */
 
 	_ring_buffer_curs_advance(buffer, count_bytes);
 
-	pthread_cleanup_pop(1);
+	/* pthread_cleanup_pop(1); */
 }
 
 void *ring_buffer_tail_address(struct ring_buffer *buffer)
@@ -251,19 +251,19 @@ static void _ring_buffer_tail_advance(struct ring_buffer *buffer,
 	lseek(buffer->fd, -sizeof(buffer->tail_offset), SEEK_END);
 	write(buffer->fd, &buffer->tail_offset, sizeof(buffer->tail_offset));
 
-	pthread_cond_broadcast(&buffer->unread_cond);
+	/* pthread_cond_broadcast(&buffer->unread_cond); */
 }
 
 void ring_buffer_tail_advance(struct ring_buffer *buffer,
 		unsigned long count_bytes)
 {
-	pthread_mutex_lock(&buffer->unread_mut);
-	pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
-			&buffer->unread_mut);
+	/* pthread_mutex_lock(&buffer->unread_mut); */
+	/* pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
+			&buffer->unread_mut); */
 
 	_ring_buffer_tail_advance(buffer, count_bytes);
 
-	pthread_cleanup_pop(1);
+	/* pthread_cleanup_pop(1); */
 }
 
 unsigned long ring_buffer_filled_bytes(struct ring_buffer *buffer)
@@ -276,7 +276,7 @@ unsigned long ring_buffer_unread_bytes(struct ring_buffer *buffer)
 	return _buf_mod(buffer, buffer->tail_offset - buffer->curs_offset);
 }
 
-void ring_buffer_wait_unread_bytes(struct ring_buffer *buffer)
+/* void ring_buffer_wait_unread_bytes(struct ring_buffer *buffer)
 {
 	pthread_mutex_lock(&buffer->unread_mut);
 	pthread_cleanup_push((void (*)(void *)) pthread_mutex_unlock,
@@ -286,7 +286,7 @@ void ring_buffer_wait_unread_bytes(struct ring_buffer *buffer)
 		pthread_cond_wait(&buffer->unread_cond, &buffer->unread_mut);
 
 	pthread_cleanup_pop(1);
-}
+} */
 
 unsigned long ring_buffer_free_bytes(struct ring_buffer *buffer)
 {
@@ -304,7 +304,7 @@ void ring_buffer_clear(struct ring_buffer *buffer)
 	write(buffer->fd, &buffer->head_offset, sizeof(buffer->head_offset));
 	write(buffer->fd, &buffer->tail_offset, sizeof(buffer->tail_offset));
 
-	pthread_cond_broadcast(&buffer->unread_cond);
+	/* pthread_cond_broadcast(&buffer->unread_cond); */
 }
 
 /* 

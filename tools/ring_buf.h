@@ -28,15 +28,15 @@
 #ifndef CIRC_BUF_H
 #define CIRC_BUF_H
 
-#include <pthread.h>
+/* #include <pthread.h> */
 
 struct ring_buffer
 {
 	char *address;
 	int fd;
 
-	pthread_cond_t unread_cond;
-	pthread_mutex_t unread_mut;
+	/* pthread_cond_t unread_cond; */
+	/* pthread_mutex_t unread_mut; */
 
 	unsigned long count_bytes;
 	unsigned long tail_offset;

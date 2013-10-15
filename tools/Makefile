@@ -7,8 +7,10 @@ all : $(TOOLS) $(TEST)
 
 include ../buildnum.mk
 
-isoblued : LDLIBS += -lbluetooth -lpthread
+isoblued : LDLIBS += -lbluetooth
 isoblued : ring_buf.o
+
+ring_buf.o : ring_buf.c ring_buf.h
 
 install : $(TOOLS:%=install_%)
 
