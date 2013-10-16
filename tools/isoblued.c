@@ -32,8 +32,9 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
-#include <argp.h>
 #include <limits.h>
+
+#include <argp.h>
  
 #include <net/if.h>
 #include <sys/types.h>
@@ -121,11 +122,20 @@ sdp_session_t *register_service(uint8_t rfcomm_channel)
     return session;
 }
 
-int send_func(int rc, struct ring_buffer *buf);
-int command_func(int rc, struct ring_buffer *buf, int *s);
+static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
+		struct ring_buffer buf, int *s, int ns, int bt);
+static inline int wait_func(int n_fds, fd_set *tmp_rfds, fd_set *tmp_wfds);
+static inline int read_func(int sock, int iface, struct ring_buffer *buf);
+static inline int send_func(int rc, struct ring_buffer *buf);
+static inline int command_func(int rc, struct ring_buffer *buf, int *s);
 
 /* argp goodies */
-const char *argp_program_version = "isoblued 0.3.0" "\n" BUILD_NUM;
+#define ISOBLUED_VER	"isoblued 0.3.0"
+#ifdef BUILD_NUM
+const char *argp_program_version = ISOBLUED_VER "\n" BUILD_NUM;
+#else
+const char *argp_program_version = ISOBLUED_VER;
+#endif
 const char *argp_program_bug_address = "<bugs@isoblue.org>";
 static char doc[] = "ISOBlue Daemon -- communicates with libISOBlue";
 static char args_doc[] = "BUF_FILE [IFACE]...";
@@ -171,15 +181,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 
 	return 0;
 }
-static struct argp argp = {options, parse_opt, args_doc, doc};
+static struct argp argp = {options, parse_opt, args_doc, doc, NULL, NULL, NULL};
 
 int main(int argc, char *argv[]) {
-	struct sockaddr_can addr = { 0 };
-	struct isobus_mesg mes = { 0 };
-	struct ifreq ifr;
-	struct timeval ts;
-	int i;
-
 	fd_set read_fds, write_fds;
 	int n_fds; 
 
@@ -187,7 +191,7 @@ int main(int argc, char *argv[]) {
 	socklen_t len;
 	sdp_session_t *session;
 
-	int bt, rc = -1;
+	int bt;
 	int ns;
 	int *s;
 	struct ring_buffer buf;
@@ -235,7 +239,11 @@ int main(int argc, char *argv[]) {
 	ring_buffer_create(&buf, 20 + arguments.buf_order, arguments.file);
 
 	/* Initialize ISOBUS sockets */
+	int i;
 	for(i = 0; i < arguments.nifaces; i++) {
+		struct sockaddr_can addr = { 0 };
+		struct ifreq ifr;
+
 		if((s[i] = socket(PF_CAN, SOCK_DGRAM | SOCK_NONBLOCK, CAN_ISOBUS))
 				< 0) {
 			perror("socket (can)");
@@ -258,89 +266,43 @@ int main(int argc, char *argv[]) {
 		n_fds = s[i] > n_fds ? s[i] : n_fds;
 	}
 
+	/* Do socket stuff */
+	loop_func(n_fds, read_fds, write_fds, buf, s, ns, bt);
+
+	sdp_close(session);
+
+	return EXIT_SUCCESS;
+}
+
+static inline void check_send(struct ring_buffer *buf, int rc,
+		fd_set *write_fds)
+{
+	if(ring_buffer_unread_bytes(buf)) {
+		FD_SET(rc, write_fds);
+	} else {
+		FD_CLR(rc, write_fds);
+	}
+}
+
+static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
+		struct ring_buffer buf, int *s, int ns, int bt)
+{
+	int rc = -1;
+
 	while(1) {
 		fd_set tmp_rfds = read_fds, tmp_wfds = write_fds;
-		if(select(n_fds + 1, &tmp_rfds, &tmp_wfds, NULL, NULL) < 0) {
-		   perror("select");
-		   return EXIT_FAILURE;
+		if(wait_func(n_fds, &tmp_rfds, &tmp_wfds) == 0) {
+			continue;
 		}
 
 		/* Read ISOBUS */
+		int i;
 		for(i = 0; i < ns; i++) {
 			if(!FD_ISSET(s[i], &tmp_rfds)) {
 				continue;
 			}
 
-			/* Buffer received CAN frames */
-			struct msghdr msg;
-			struct iovec iov;
-			char ctrlmsg[CMSG_SPACE(sizeof(struct sockaddr_can))];
-			/* Construct msghdr to use to recevie messages from socket */
-			msg.msg_name = &addr;
-			msg.msg_namelen = sizeof(addr);
-			msg.msg_iov = &iov;
-			msg.msg_control = &ctrlmsg;
-			msg.msg_controllen = sizeof(ctrlmsg);
-			msg.msg_iovlen = 1;
-			iov.iov_base = &mes;
-			iov.iov_len = sizeof(mes);
-
-			if(recvmsg(s[i], &msg, 0) != -1) {
-				/* Get saddr */
-				struct sockaddr_can daddr;
-				struct cmsghdr *cmsg;
-				for(cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
-						cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-					if(cmsg->cmsg_level == SOL_CAN_ISOBUS &&
-							cmsg->cmsg_type == CAN_ISOBUS_DADDR) {
-						daddr = *(struct sockaddr_can *)CMSG_DATA(cmsg);
-					}
-				}
-
-				/* Find approximate receive time */
-				gettimeofday(&ts, NULL);
-
-				/* Print messages */
-				int chars;
-				chars = 0;
-				chars += sprintf(ring_buffer_tail_address(&buf),
-						"\n%d %06d %d ",
-						i,
-						mes.pgn,
-						mes.dlen);
-
-				int j;
-				for(j = 0; j < mes.dlen; j++)
-				{
-					chars += sprintf(ring_buffer_tail_address(&buf) + chars,
-							"%02x ", mes.data[j]);
-				}
-
-				chars += sprintf(ring_buffer_tail_address(&buf) + chars,
-						"%ld.%06ld %02x %02x",
-						ts.tv_sec, ts.tv_usec,
-						addr.can_addr.isobus.addr,
-						daddr.can_addr.isobus.addr);
-
-				ring_buffer_tail_advance(&buf, chars);
-				*(char *)ring_buffer_tail_address(&buf) = '\n';
-
-				printf("Message received\n");
-			} else {
-				perror("recvmsg");
-			}
-		}
-
-		/* Accept Bluetooth connection */
-		if(FD_ISSET(bt, &tmp_rfds)) {
-			if((rc = accept(bt, NULL, NULL)) < 0) {
-				perror("accept");
-			} else {
-				FD_SET(rc, &read_fds);
-				FD_SET(rc, &write_fds);
-				n_fds = rc > n_fds ? rc : n_fds;
-				FD_CLR(bt, &read_fds);
-			}
+			read_func(s[i], i, &buf);
 		}
 
 		/* Check RFCOMM connection */
@@ -353,6 +315,7 @@ int main(int argc, char *argv[]) {
 					FD_SET(bt, &read_fds);
 					close(rc);
 					rc = -1;
+					continue;
 				}
 			}
 
@@ -364,24 +327,118 @@ int main(int argc, char *argv[]) {
 					FD_SET(bt, &read_fds);
 					close(rc);
 					rc = -1;
+					continue;
 				}
 			}
 
 			/* Check send buffer */
-			if(ring_buffer_unread_bytes(&buf)) {
-				FD_SET(rc, &write_fds);
-			} else {
-				FD_CLR(rc, &write_fds);
+			check_send(&buf, rc, &write_fds);
+		} else {
+			/* Accept Bluetooth connection */
+			if(FD_ISSET(bt, &tmp_rfds)) {
+				if((rc = accept(bt, NULL, NULL)) < 0) {
+					perror("accept");
+				} else {
+					FD_SET(rc, &read_fds);
+					FD_SET(rc, &write_fds);
+					n_fds = rc > n_fds ? rc : n_fds;
+					FD_CLR(bt, &read_fds);
+				}
 			}
 		}
 	}
-
-	sdp_close(session);
-
-	return EXIT_SUCCESS;
 }
 
-int send_func(int rc, struct ring_buffer *buf)
+static inline int wait_func(int n_fds, fd_set *tmp_rfds, fd_set *tmp_wfds)
+{
+	int ret;
+
+	if((ret = select(n_fds + 1, tmp_rfds, tmp_wfds, NULL, NULL)) < 0) {
+		perror("select");
+
+		switch(errno) {
+		case EINTR:
+			return 0;
+
+		default:
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	return ret;
+}
+
+static inline int read_func(int sock, int iface, struct ring_buffer *buf)
+{
+	struct isobus_mesg mes = { 0 };
+	struct sockaddr_can addr = { 0 };
+	struct timeval ts;
+
+	/* Buffer received CAN frames */
+	struct msghdr msg = { 0 };
+	struct iovec iov = { 0 };
+	char ctrlmsg[CMSG_SPACE(sizeof(struct sockaddr_can))];
+	/* Construct msghdr to use to recevie messages from socket */
+	msg.msg_name = &addr;
+	msg.msg_namelen = sizeof(addr);
+	msg.msg_iov = &iov;
+	msg.msg_control = ctrlmsg;
+	msg.msg_controllen = sizeof(ctrlmsg);
+	msg.msg_iovlen = 1;
+	iov.iov_base = &mes;
+	iov.iov_len = sizeof(mes);
+
+	if(recvmsg(sock, &msg, 0) <= 0) {
+		perror("recvmsg");
+		exit(0);
+	}
+
+	/* Get saddr */
+	struct sockaddr_can daddr = { 0 };
+	struct cmsghdr *cmsg;
+	for(cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+			cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+		if(cmsg->cmsg_level == SOL_CAN_ISOBUS &&
+				cmsg->cmsg_type == CAN_ISOBUS_DADDR) {
+			memcpy(&daddr, CMSG_DATA(cmsg), sizeof(daddr));
+			break;
+		}
+	}
+
+	/* Find approximate receive time */
+	gettimeofday(&ts, NULL);
+
+	/* Print messages */
+	int chars;
+	chars = 0;
+	chars += sprintf(ring_buffer_tail_address(buf),
+			"\n%d %06d %d ",
+			iface,
+			mes.pgn,
+			mes.dlen);
+
+	int j;
+	for(j = 0; j < mes.dlen; j++)
+	{
+		chars += sprintf(ring_buffer_tail_address(buf) + chars,
+				"%02x ", mes.data[j]);
+	}
+
+	chars += sprintf(ring_buffer_tail_address(buf) + chars,
+			"%ld.%06ld %02x %02x",
+			ts.tv_sec, ts.tv_usec,
+			addr.can_addr.isobus.addr,
+			daddr.can_addr.isobus.addr);
+
+	ring_buffer_tail_advance(buf, chars);
+	*(char *)ring_buffer_tail_address(buf) = '\n';
+
+	//printf("Message received\n");
+
+	return 1;
+}
+
+static inline int send_func(int rc, struct ring_buffer *buf)
 {
 	int chars;
 	char *mesg;
@@ -406,8 +463,8 @@ int send_func(int rc, struct ring_buffer *buf)
 		}
 	}
 
-	mesg[chars-1] = '\0';
-	printf("%s\n", mesg);
+	//mesg[chars-1] = '\0';
+	//printf("%s\n", mesg);
 
 	ring_buffer_curs_advance(buf, chars);
 	free(mesg);
@@ -415,7 +472,7 @@ int send_func(int rc, struct ring_buffer *buf)
 	return 1;
 }
 
-int command_func(int rc, struct ring_buffer *buf, int *s)
+static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 {
 	/* Buffer for reassembling commands */
 	#define CMD_BUF_SIZE	0x01FFFF
@@ -423,7 +480,8 @@ int command_func(int rc, struct ring_buffer *buf, int *s)
 	static int curs = 0, tail = 0;
 
 	int chars;
-	chars = read(rc, buffer+tail, INT_MAX-tail);
+	chars = recv(rc, buffer+tail, CMD_BUF_SIZE-tail, 0);
+	printf("%*s\n", chars, buffer+tail);
 	if(chars < 0) {
 		perror("read");
 		return -1;

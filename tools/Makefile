@@ -1,7 +1,7 @@
 TOOLS := can_log_raw isoblued
 TEST := sc_mod_test
 PREFIX := /usr
-CFLAGS := -Wall -g
+CFLAGS := -Wall -Wextra -O3 $(CFLAGS)
 
 all : $(TOOLS) $(TEST)
 
