@@ -27,12 +27,12 @@
  * IN THE SOFTWARE.
  */
 
+#define ISOBLUED_VER	"isoblued 0.3.0"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <string.h>
-#include <limits.h>
 
 #include <argp.h>
  
@@ -57,6 +57,7 @@ enum opcode {
 	SEND_MESG = 'W',
 };
 
+/* Registers isoblued with the SDP server */
 sdp_session_t *register_service(uint8_t rfcomm_channel)
 {
     uint128_t service_uuid_int = { {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -122,15 +123,7 @@ sdp_session_t *register_service(uint8_t rfcomm_channel)
     return session;
 }
 
-static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
-		struct ring_buffer buf, int *s, int ns, int bt);
-static inline int wait_func(int n_fds, fd_set *tmp_rfds, fd_set *tmp_wfds);
-static inline int read_func(int sock, int iface, struct ring_buffer *buf);
-static inline int send_func(int rc, struct ring_buffer *buf);
-static inline int command_func(int rc, struct ring_buffer *buf, int *s);
-
 /* argp goodies */
-#define ISOBLUED_VER	"isoblued 0.3.0"
 #ifdef BUILD_NUM
 const char *argp_program_version = ISOBLUED_VER "\n" BUILD_NUM;
 #else
@@ -183,97 +176,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 }
 static struct argp argp = {options, parse_opt, args_doc, doc, NULL, NULL, NULL};
 
-int main(int argc, char *argv[]) {
-	fd_set read_fds, write_fds;
-	int n_fds; 
-
-	struct sockaddr_rc rc_addr = { 0 };
-	socklen_t len;
-	sdp_session_t *session;
-
-	int bt;
-	int ns;
-	int *s;
-	struct ring_buffer buf;
-
-	/* Handle options */
-	#define DEF_IFACES	((char*[]) {"ib_eng", "ib_imp"})
-	struct arguments arguments = {
-		"isoblue.log",
-		DEF_IFACES,
-		sizeof(DEF_IFACES) / sizeof(*DEF_IFACES),
-		0,
-		0,
-	};
-	argp_parse(&argp, argc, argv, 0, 0, &arguments);
-
-	s = calloc(arguments.nifaces, sizeof(*s));
-	ns = arguments.nifaces;
-	FD_ZERO(&read_fds);
-	FD_ZERO(&write_fds);
-	n_fds = 0;
-
-	if((bt = socket(PF_BLUETOOTH, SOCK_STREAM | SOCK_NONBLOCK, BTPROTO_RFCOMM))
-			< 0) {
-		perror("socket (bt)");
-		return EXIT_FAILURE;
-	}
-	rc_addr.rc_family = AF_BLUETOOTH;
-	rc_addr.rc_bdaddr = *BDADDR_ANY;
-	rc_addr.rc_channel = arguments.channel;
-	if(bind(bt, (struct sockaddr *)&rc_addr, sizeof(rc_addr)) < 0) {
-		perror("bind bt");
-		return EXIT_FAILURE;
-	}
-	listen(bt, 1);
-	len = sizeof(rc_addr);
-	if(getsockname(bt, (struct sockaddr *)&rc_addr, &len) < 0) {
-		perror("getsockname");
-		return EXIT_FAILURE;
-	}
-	FD_SET(bt, &read_fds);
-	n_fds = bt > n_fds ? bt : n_fds;
-
-	session = register_service(rc_addr.rc_channel);
-
-	ring_buffer_create(&buf, 20 + arguments.buf_order, arguments.file);
-
-	/* Initialize ISOBUS sockets */
-	int i;
-	for(i = 0; i < arguments.nifaces; i++) {
-		struct sockaddr_can addr = { 0 };
-		struct ifreq ifr;
-
-		if((s[i] = socket(PF_CAN, SOCK_DGRAM | SOCK_NONBLOCK, CAN_ISOBUS))
-				< 0) {
-			perror("socket (can)");
-			return EXIT_FAILURE;
-		}
-
-		/* Set interface name to argument value */
-		strcpy(ifr.ifr_name, arguments.ifaces[i]);
-		ioctl(s[i], SIOCGIFINDEX, &ifr);
-		addr.can_family  = AF_CAN;
-		addr.can_ifindex = ifr.ifr_ifindex; 
-		addr.can_addr.isobus.addr = CAN_ISOBUS_ANY_ADDR;
-
-		if(bind(s[i], (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-			perror("bind can");
-			return EXIT_FAILURE;
-		}
-
-		FD_SET(s[i], &read_fds);
-		n_fds = s[i] > n_fds ? s[i] : n_fds;
-	}
-
-	/* Do socket stuff */
-	loop_func(n_fds, read_fds, write_fds, buf, s, ns, bt);
-
-	sdp_close(session);
-
-	return EXIT_SUCCESS;
-}
-
+/* Function to check if any messages are buffered */
 static inline void check_send(struct ring_buffer *buf, int rc,
 		fd_set *write_fds)
 {
@@ -284,71 +187,7 @@ static inline void check_send(struct ring_buffer *buf, int rc,
 	}
 }
 
-static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
-		struct ring_buffer buf, int *s, int ns, int bt)
-{
-	int rc = -1;
-
-	while(1) {
-		fd_set tmp_rfds = read_fds, tmp_wfds = write_fds;
-		if(wait_func(n_fds, &tmp_rfds, &tmp_wfds) == 0) {
-			continue;
-		}
-
-		/* Read ISOBUS */
-		int i;
-		for(i = 0; i < ns; i++) {
-			if(!FD_ISSET(s[i], &tmp_rfds)) {
-				continue;
-			}
-
-			read_func(s[i], i, &buf);
-		}
-
-		/* Check RFCOMM connection */
-		if(rc > 0) {
-			/* Read RFCOMM */
-			if(FD_ISSET(rc, &tmp_rfds)) {
-				if(command_func(rc, &buf, s) < 0) {
-					FD_CLR(rc, &read_fds);
-					FD_CLR(rc, &write_fds);
-					FD_SET(bt, &read_fds);
-					close(rc);
-					rc = -1;
-					continue;
-				}
-			}
-
-			/* Write RFCOMM */
-			if(FD_ISSET(rc, &tmp_wfds)) {
-				if(send_func(rc, &buf) < 0) {
-					FD_CLR(rc, &read_fds);
-					FD_CLR(rc, &write_fds);
-					FD_SET(bt, &read_fds);
-					close(rc);
-					rc = -1;
-					continue;
-				}
-			}
-
-			/* Check send buffer */
-			check_send(&buf, rc, &write_fds);
-		} else {
-			/* Accept Bluetooth connection */
-			if(FD_ISSET(bt, &tmp_rfds)) {
-				if((rc = accept(bt, NULL, NULL)) < 0) {
-					perror("accept");
-				} else {
-					FD_SET(rc, &read_fds);
-					FD_SET(rc, &write_fds);
-					n_fds = rc > n_fds ? rc : n_fds;
-					FD_CLR(bt, &read_fds);
-				}
-			}
-		}
-	}
-}
-
+/* Function to wait for one or more file descriptors to be ready */
 static inline int wait_func(int n_fds, fd_set *tmp_rfds, fd_set *tmp_wfds)
 {
 	int ret;
@@ -368,6 +207,7 @@ static inline int wait_func(int n_fds, fd_set *tmp_rfds, fd_set *tmp_wfds)
 	return ret;
 }
 
+/* Function to handle incoming ISOBUS message(s) */
 static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 {
 	struct isobus_mesg mes = { 0 };
@@ -388,7 +228,7 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	iov.iov_base = &mes;
 	iov.iov_len = sizeof(mes);
 
-	if(recvmsg(sock, &msg, 0) <= 0) {
+	if(recvmsg(sock, &msg, MSG_DONTWAIT) <= 0) {
 		perror("recvmsg");
 		exit(0);
 	}
@@ -409,49 +249,35 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	gettimeofday(&ts, NULL);
 
 	/* Print messages */
-	int chars;
-	chars = 0;
-	chars += sprintf(ring_buffer_tail_address(buf),
-			"\n%d %06d %d ",
-			iface,
-			mes.pgn,
-			mes.dlen);
-
+	char *sp, *cp;
 	int j;
+
+	cp = sp = ring_buffer_tail_address(buf);
+
+	cp += sprintf(cp, "%d %06d %d ", iface, mes.pgn, mes.dlen);
 	for(j = 0; j < mes.dlen; j++)
 	{
-		chars += sprintf(ring_buffer_tail_address(buf) + chars,
-				"%02x ", mes.data[j]);
+		cp += sprintf(cp,"%02x ", mes.data[j]);
 	}
+	cp += sprintf(cp, "%ld.%06ld %02x %02x\n", ts.tv_sec, ts.tv_usec,
+			addr.can_addr.isobus.addr, daddr.can_addr.isobus.addr);
 
-	chars += sprintf(ring_buffer_tail_address(buf) + chars,
-			"%ld.%06ld %02x %02x",
-			ts.tv_sec, ts.tv_usec,
-			addr.can_addr.isobus.addr,
-			daddr.can_addr.isobus.addr);
-
-	ring_buffer_tail_advance(buf, chars);
-	*(char *)ring_buffer_tail_address(buf) = '\n';
-
-	//printf("Message received\n");
+	ring_buffer_tail_advance(buf, cp-sp+1);
 
 	return 1;
 }
 
+/* Function to send buffered messages over Bluetooth */
 static inline int send_func(int rc, struct ring_buffer *buf)
 {
-	int chars;
-	char *mesg;
+	int chars, sent;
+	char *buffer;
 
-	if(sscanf(ring_buffer_curs_address(buf),
-			"\n%m[^\n]\n", &mesg) != 1) {
-		perror("sscanf");
-		return 0;
-	}
-	chars = strlen(mesg);
+	/* Send one message (or part of one) at a time */
+	buffer = ring_buffer_curs_address(buf);
+	chars = strlen(buffer);
 
-	mesg[chars++] = '\n';
-	if(send(rc, mesg, chars, 0) < 0) {
+	if((sent = send(rc, buffer, chars, MSG_DONTWAIT)) < 0) {
 		perror("send");
 
 		switch(errno) {
@@ -463,15 +289,16 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 		}
 	}
 
-	//mesg[chars-1] = '\0';
-	//printf("%s\n", mesg);
-
-	ring_buffer_curs_advance(buf, chars);
-	free(mesg);
+	/*
+	 * If done, need to skip over the null character as well,
+	 * otherwise just skip what was sent
+	 */
+	ring_buffer_curs_advance(buf, chars == sent ? chars+1 : sent);
 
 	return 1;
 }
 
+/* Function to handle commands from Bluetooth */
 static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 {
 	/* Buffer for reassembling commands */
@@ -480,8 +307,7 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	static int curs = 0, tail = 0;
 
 	int chars;
-	chars = recv(rc, buffer+tail, CMD_BUF_SIZE-tail, 0);
-	printf("%*s\n", chars, buffer+tail);
+	chars = recv(rc, buffer+tail, CMD_BUF_SIZE-tail, MSG_DONTWAIT);
 	if(chars < 0) {
 		perror("read");
 		return -1;
@@ -506,7 +332,6 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	char *args;
 	op = buffer[0];
 	args = buffer+2;
-	printf("op %c, %s\n", op, args);
 
 	switch(op) {
 	case SET_FILTERS:
@@ -597,5 +422,162 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	curs = 0;
 
 	return 0;
+}
+
+/* Function that does all the work after initialization */
+static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
+		struct ring_buffer buf, int *s, int ns, int bt)
+{
+	int rc = -1;
+
+	while(1) {
+		fd_set tmp_rfds = read_fds, tmp_wfds = write_fds;
+		if(wait_func(n_fds, &tmp_rfds, &tmp_wfds) == 0) {
+			continue;
+		}
+
+		/* Read ISOBUS */
+		int i;
+		for(i = 0; i < ns; i++) {
+			if(!FD_ISSET(s[i], &tmp_rfds)) {
+				continue;
+			}
+
+			read_func(s[i], i, &buf);
+		}
+
+		/* Check RFCOMM connection */
+		if(rc > 0) {
+			/* Read RFCOMM */
+			if(FD_ISSET(rc, &tmp_rfds)) {
+				if(command_func(rc, &buf, s) < 0) {
+					FD_CLR(rc, &read_fds);
+					FD_CLR(rc, &write_fds);
+					FD_SET(bt, &read_fds);
+					close(rc);
+					rc = -1;
+					continue;
+				}
+			}
+
+			/* Write RFCOMM */
+			if(FD_ISSET(rc, &tmp_wfds)) {
+				if(send_func(rc, &buf) < 0) {
+					FD_CLR(rc, &read_fds);
+					FD_CLR(rc, &write_fds);
+					FD_SET(bt, &read_fds);
+					close(rc);
+					rc = -1;
+					continue;
+				}
+			}
+
+			/* Check send buffer */
+			check_send(&buf, rc, &write_fds);
+		} else {
+			/* Accept Bluetooth connection */
+			if(FD_ISSET(bt, &tmp_rfds)) {
+				if((rc = accept(bt, NULL, NULL)) < 0) {
+					perror("accept");
+				} else {
+					FD_SET(rc, &read_fds);
+					FD_SET(rc, &write_fds);
+					n_fds = rc > n_fds ? rc : n_fds;
+					FD_CLR(bt, &read_fds);
+				}
+			}
+		}
+	}
+}
+
+int main(int argc, char *argv[]) {
+	fd_set read_fds, write_fds;
+	int n_fds; 
+
+	struct sockaddr_rc rc_addr = { 0 };
+	socklen_t len;
+	sdp_session_t *session;
+
+	int bt;
+	int ns;
+	int *s;
+	struct ring_buffer buf;
+
+	/* Handle options */
+	#define DEF_IFACES	((char*[]) {"ib_eng", "ib_imp"})
+	struct arguments arguments = {
+		"isoblue.log",
+		DEF_IFACES,
+		sizeof(DEF_IFACES) / sizeof(*DEF_IFACES),
+		0,
+		0,
+	};
+	argp_parse(&argp, argc, argv, 0, 0, &arguments);
+
+	s = calloc(arguments.nifaces, sizeof(*s));
+	ns = arguments.nifaces;
+	FD_ZERO(&read_fds);
+	FD_ZERO(&write_fds);
+	n_fds = 0;
+
+	if((bt = socket(PF_BLUETOOTH, SOCK_STREAM | SOCK_NONBLOCK, BTPROTO_RFCOMM))
+			< 0) {
+		perror("socket (bt)");
+		return EXIT_FAILURE;
+	}
+	rc_addr.rc_family = AF_BLUETOOTH;
+	rc_addr.rc_bdaddr = *BDADDR_ANY;
+	rc_addr.rc_channel = arguments.channel;
+	if(bind(bt, (struct sockaddr *)&rc_addr, sizeof(rc_addr)) < 0) {
+		perror("bind bt");
+		return EXIT_FAILURE;
+	}
+	listen(bt, 1);
+	len = sizeof(rc_addr);
+	if(getsockname(bt, (struct sockaddr *)&rc_addr, &len) < 0) {
+		perror("getsockname");
+		return EXIT_FAILURE;
+	}
+	FD_SET(bt, &read_fds);
+	n_fds = bt > n_fds ? bt : n_fds;
+
+	session = register_service(rc_addr.rc_channel);
+
+	ring_buffer_create(&buf, 20 + arguments.buf_order, arguments.file);
+
+	/* Initialize ISOBUS sockets */
+	int i;
+	for(i = 0; i < arguments.nifaces; i++) {
+		struct sockaddr_can addr = { 0 };
+		struct ifreq ifr;
+
+		if((s[i] = socket(PF_CAN, SOCK_DGRAM | SOCK_NONBLOCK, CAN_ISOBUS))
+				< 0) {
+			perror("socket (can)");
+			return EXIT_FAILURE;
+		}
+
+		/* Set interface name to argument value */
+		strcpy(ifr.ifr_name, arguments.ifaces[i]);
+		ioctl(s[i], SIOCGIFINDEX, &ifr);
+		addr.can_family  = AF_CAN;
+		addr.can_ifindex = ifr.ifr_ifindex; 
+		addr.can_addr.isobus.addr = CAN_ISOBUS_ANY_ADDR;
+
+		if(bind(s[i], (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+			perror("bind can");
+			return EXIT_FAILURE;
+		}
+
+		FD_SET(s[i], &read_fds);
+		n_fds = s[i] > n_fds ? s[i] : n_fds;
+	}
+
+	/* Do socket stuff */
+	loop_func(n_fds, read_fds, write_fds, buf, s, ns, bt);
+
+	sdp_close(session);
+
+	return EXIT_SUCCESS;
 }
 
