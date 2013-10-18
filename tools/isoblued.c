@@ -245,41 +245,41 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 {
 	struct isobus_mesg mes = { 0 };
 	struct sockaddr_can addr = { 0 };
-	struct timeval ts;
 
 	/* Buffer received CAN frames */
 	struct msghdr msg = { 0 };
 	struct iovec iov = { 0 };
-	char ctrlmsg[CMSG_SPACE(sizeof(struct sockaddr_can))];
+	char cmsgb[CMSG_SPACE(sizeof(struct sockaddr_can)) +
+		CMSG_SPACE(sizeof(struct timeval))];
 	/* Construct msghdr to use to recevie messages from socket */
 	msg.msg_name = &addr;
 	msg.msg_namelen = sizeof(addr);
 	msg.msg_iov = &iov;
-	msg.msg_control = ctrlmsg;
-	msg.msg_controllen = sizeof(ctrlmsg);
+	msg.msg_control = cmsgb;
+	msg.msg_controllen = sizeof(cmsgb);
 	msg.msg_iovlen = 1;
 	iov.iov_base = &mes;
 	iov.iov_len = sizeof(mes);
 
 	if(recvmsg(sock, &msg, MSG_DONTWAIT) <= 0) {
 		perror("recvmsg");
-		exit(0);
+		exit(EXIT_FAILURE);
 	}
 
-	/* Get saddr */
+	/* Get saddr and approximate arrival time */
 	struct sockaddr_can daddr = { 0 };
+	struct timeval tv = { 0 };
 	struct cmsghdr *cmsg;
 	for(cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
 			cmsg = CMSG_NXTHDR(&msg, cmsg)) {
 		if(cmsg->cmsg_level == SOL_CAN_ISOBUS &&
 				cmsg->cmsg_type == CAN_ISOBUS_DADDR) {
 			memcpy(&daddr, CMSG_DATA(cmsg), sizeof(daddr));
-			break;
+		} else if(cmsg->cmsg_level == SOL_SOCKET &&
+				cmsg->cmsg_type == SO_TIMESTAMP) {
+			memcpy(&tv, CMSG_DATA(cmsg), sizeof(tv));
 		}
 	}
-
-	/* Find approximate receive time */
-	gettimeofday(&ts, NULL);
 
 	/* Print messages */
 	char *sp, *cp;
@@ -292,7 +292,7 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	{
 		cp += sprintf(cp,"%02x ", mes.data[j]);
 	}
-	cp += sprintf(cp, "%ld.%06ld %02x %02x\n", ts.tv_sec, ts.tv_usec,
+	cp += sprintf(cp, "%ld.%06ld %02x %02x\n", tv.tv_sec, tv.tv_usec,
 			addr.can_addr.isobus.addr, daddr.can_addr.isobus.addr);
 
 	ring_buffer_tail_advance(buf, cp-sp+1);
@@ -601,6 +601,10 @@ int main(int argc, char *argv[]) {
 			perror("bind can");
 			return EXIT_FAILURE;
 		}
+
+		/* Timestamp frames */
+		const int val = 1;
+		setsockopt(s[i], SOL_SOCKET, SO_TIMESTAMP, &val, sizeof(val));
 
 		FD_SET(s[i], &read_fds);
 		n_fds = s[i] > n_fds ? s[i] : n_fds;
