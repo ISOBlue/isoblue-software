@@ -27,7 +27,7 @@
  * IN THE SOFTWARE.
  */
 
-#define ISOBLUED_VER	"isoblued 0.3.0"
+#define ISOBLUED_VER	"isoblued - ISOBlue daemon 0.3.0"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -130,9 +130,11 @@ const char *argp_program_version = ISOBLUED_VER "\n" BUILD_NUM;
 const char *argp_program_version = ISOBLUED_VER;
 #endif
 const char *argp_program_bug_address = "<bugs@isoblue.org>";
-static char doc[] = "ISOBlue Daemon -- communicates with libISOBlue";
-static char args_doc[] = "BUF_FILE [IFACE]...";
+static char args_doc[] = "BUF_FILE [IFACE...]";
+static char doc[] = "Connect ISOBlue to IFACE(s), using BUF_FILE as a buffer.";
 static struct argp_option options[] = {
+	{NULL, 0, NULL, 0, "About", -1},
+	{NULL, 0, NULL, 0, "Configuration", 0},
 	{"channel", 'c', "<channel>", 0, "RFCOMM Channel", 0},
 	{"buffer-order", 'b', "<order>", 0, "Use a 2^<order> MB buffer", 0},
 	{ 0 }
@@ -144,7 +146,8 @@ struct arguments {
 	int channel;
 	int buf_order;
 };
-static error_t parse_opt(int key, char *arg, struct argp_state *state) {
+static error_t parse_opt(int key, char *arg, struct argp_state *state)
+{
 	struct arguments *arguments = state->input;
 
 	switch(key) {
@@ -174,7 +177,37 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 
 	return 0;
 }
-static struct argp argp = {options, parse_opt, args_doc, doc, NULL, NULL, NULL};
+#define POST_DOC_TEXT	"With no IFACE, connect to ib_eng and ib_imp."
+#define EXTRA_TEXT	"ISOBlue home page <http://www.isoblue.org>"
+static char *help_filter(int key, const char *text, void *input)
+{
+	char *buffer = input;
+
+	switch(key) {
+	case ARGP_KEY_HELP_POST_DOC:
+		return strdup(POST_DOC_TEXT);
+
+	case ARGP_KEY_HELP_EXTRA:
+		return strdup(EXTRA_TEXT);
+
+	case ARGP_KEY_HELP_HEADER:
+		buffer = malloc(strlen(text)+1);
+		strcpy(buffer, text);
+		return strcat(buffer, ":");
+
+	default:
+		return (char *)text;
+	}
+}
+static struct argp argp = {
+	options,
+	parse_opt,
+	args_doc,
+	doc,
+	NULL,
+	help_filter,
+	NULL
+};
 
 /* Function to check if any messages are buffered */
 static inline void check_send(struct ring_buffer *buf, int rc,
