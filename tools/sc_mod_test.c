@@ -53,6 +53,12 @@ int main(int argc, char *argv[]) {
 	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval))+CMSG_SPACE(sizeof(__u32))];
 	struct isobus_mesg mesg;
 
+	/* Check arguments */
+	if(argc != 3) {
+		fprintf(stderr, "wrong argument count\n");
+		return EXIT_FAILURE;
+	}
+
 	if((s = socket(PF_CAN, SOCK_DGRAM, CAN_ISOBUS)) < 0) {
 		perror("Error while opening socket");
 		return -1;
