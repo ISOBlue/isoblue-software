@@ -8,12 +8,12 @@ Requires=sys-subsystem-net-devices-ib_eng.device sys-subsystem-net-devices-ib_im
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStartPre=/sbin/ifconfig ib_eng down
-ExecStartPre=/sbin/ifconfig ib_imp down
+ExecStart=/sbin/ifconfig ib_eng down
+ExecStart=/sbin/ifconfig ib_imp down
 ExecStart=/bin/ip link set ib_eng type can bitrate 250000
 ExecStart=/bin/ip link set ib_imp type can bitrate 250000
-ExecStartPost=/sbin/ifconfig ib_eng up
-ExecStartPost=/sbin/ifconfig ib_imp up
+ExecStart=/sbin/ifconfig ib_eng up
+ExecStart=/sbin/ifconfig ib_imp up
 Restart=on-failure
 RestartSec=2s
 

@@ -1,12 +1,15 @@
 # /etc/systemd/system/isoblue@.service
 
 [Unit]
-Description=ISOBlue Server on Channel %I
-After=bluetooth.service isoblue-interfaces.service
-Requires=bluetooth.service isoblue-interfaces.service
+Description=ISOBlue Daemon on Channel %I
+After=bluetooth.service isoblue-interfaces.service tmp.mount
+Requires=bluetooth.service isoblue-interfaces.service tmp.mount
+Conflicts=can-log@%i.service
 
 [Service]
-ExecStart=/usr/bin/isoblued --channel %I /tmp/isoblue%I.log ib_eng ib_imp
+ExecStartPre=-/usr/bin/isoblued --version
+ExecStart=/usr/bin/isoblued -c %I -b 6 /tmp/isoblue%I.log ib_eng ib_imp
+ExecStopPost=/bin/mv /tmp/isoblue%I.log /var/log/isoblue%I.log
 Restart=always
 RestartSec=1
 StartLimitInterval=1
