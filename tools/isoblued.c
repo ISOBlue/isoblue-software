@@ -243,23 +243,14 @@ static inline int wait_func(int n_fds, fd_set *tmp_rfds, fd_set *tmp_wfds)
 /* Function to handle incoming ISOBUS message(s) */
 static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 {
-	struct isobus_mesg mes = { 0 };
-	struct sockaddr_can addr = { 0 };
-
-	/* Buffer received CAN frames */
-	struct msghdr msg = { 0 };
-	struct iovec iov = { 0 };
-	char cmsgb[CMSG_SPACE(sizeof(struct sockaddr_can)) +
-		CMSG_SPACE(sizeof(struct timeval))];
 	/* Construct msghdr to use to recevie messages from socket */
-	msg.msg_name = &addr;
-	msg.msg_namelen = sizeof(addr);
-	msg.msg_iov = &iov;
-	msg.msg_control = cmsgb;
-	msg.msg_controllen = sizeof(cmsgb);
-	msg.msg_iovlen = 1;
-	iov.iov_base = &mes;
-	iov.iov_len = sizeof(mes);
+	static struct isobus_mesg mes;
+	static struct sockaddr_can addr;
+	static struct iovec iov = {&mes, sizeof(mes)};
+	static char cmsgb[CMSG_SPACE(sizeof(struct sockaddr_can)) +
+		CMSG_SPACE(sizeof(struct timeval))];
+	static struct msghdr msg = {&addr, sizeof(addr), &iov, 1,
+			cmsgb, sizeof(cmsgb), 0};
 
 	if(recvmsg(sock, &msg, MSG_DONTWAIT) <= 0) {
 		perror("recvmsg");
