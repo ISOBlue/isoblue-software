@@ -70,7 +70,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* Send filter(s) to ISOBlue */
-	static const char filt_cmd[] = "F 0 0 \n";
+	static const char filt_cmd[] = "F000000\nF100000\n";
 	if(send(bt, filt_cmd, strlen(filt_cmd), MSG_WAITALL) != strlen(filt_cmd)) {
 		perror("send");
 		return EXIT_FAILURE;
