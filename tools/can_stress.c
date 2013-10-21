@@ -5,7 +5,7 @@
  * sending a sequence of frames incrementing data bytes .
  *
  *
- * Author: Alex Layton <awlayton@purdue.edu>
+ * Author: Alex Layton <alex@layton.in>
  *
  * Copyright (C) 2013 Purdue University
  *
@@ -28,10 +28,14 @@
  * IN THE SOFTWARE.
  */
 
+#define CANSTRESS_VER	"canstress - CAN stress tester 1.1"
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+
+#include <argp.h>
 
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -39,6 +43,76 @@
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
+
+/* argp goodies */
+#ifdef BUILD_NUM
+const char *argp_program_version = CANSTRESS_VER "\n" BUILD_NUM;
+#else
+const char *argp_program_version = CANSTRESS_VER;
+#endif
+const char *argp_program_bug_address = "<bugs@isoblue.org>";
+static char args_doc[] = "IFACE...";
+static char doc[] = "Continually send on IFACE(s) to stress test CAN bus(es).";
+static struct argp_option options[] = {
+	{NULL, 0, NULL, 0, "About", -1},
+	{NULL, 0, NULL, 0, "Configuration", 0},
+	{"count", 'c', "<count>", 0, "Stop after <count> frames", 0},
+	{"length", 'l', "<bytes>", 0, "Send <bytes> bytes of data per frame", 0},
+	{ 0 }
+};
+struct arguments {
+	char **ifaces;
+	int nifaces;
+	int count;
+	int length;
+};
+static error_t parse_opt(int key, char *arg, struct argp_state *state)
+{
+	struct arguments *arguments = state->input;
+
+	switch(key) {
+	case 'c':
+		arguments->count = atoi(arg);
+		break;
+
+	case 'l':
+		arguments->length = atoi(arg);
+		break;
+
+	case ARGP_KEY_ARGS:
+		arguments->ifaces = state->argv + state->next;
+		arguments->nifaces = state->argc - state->next;
+		break;
+
+	default:
+		return ARGP_ERR_UNKNOWN;
+	}
+
+	return 0;
+}
+static char *help_filter(int key, const char *text, void *input)
+{
+	char *buffer = input;
+
+	switch(key) {
+	case ARGP_KEY_HELP_HEADER:
+		buffer = malloc(strlen(text)+1);
+		strcpy(buffer, text);
+		return strcat(buffer, ":");
+
+	default:
+		return (char *)text;
+	}
+}
+static struct argp argp = {
+	options,
+	parse_opt,
+	args_doc,
+	doc,
+	NULL,
+	help_filter,
+	NULL
+};
 
 int main(int argc, char *argv[])
 {
@@ -48,13 +122,22 @@ int main(int argc, char *argv[])
 	int nfds;
 
 	int i;
+
+	/* Handle options */
+	struct arguments arguments = {
+		NULL,
+		0,
+		0,
+		8,
+	};
+	argp_parse(&argp, argc, argv, 0, 0, &arguments);
 	
-	socks = calloc(argc-1, sizeof(*socks));
-	nums = calloc(argc-1, sizeof(*nums));
+	socks = calloc(arguments.nifaces, sizeof(*socks));
+	nums = calloc(arguments.nifaces, sizeof(*nums));
 
 	FD_ZERO(&fds);
 	nfds = 0;
-	for(i = 0; i < argc-1; i++) {
+	for(i = 0; i < arguments.nifaces; i++) {
 		struct sockaddr_can addr = { 0 };
 		struct ifreq ifr;
 
@@ -64,7 +147,7 @@ int main(int argc, char *argv[])
 			return EXIT_FAILURE;
 		}
 
-		strcpy(ifr.ifr_name, argv[i+1]);
+		strcpy(ifr.ifr_name, arguments.ifaces[i]);
 		ioctl(socks[i], SIOCGIFINDEX, &ifr);
 		addr.can_family  = AF_CAN;
 		addr.can_ifindex = ifr.ifr_ifindex; 
@@ -77,8 +160,8 @@ int main(int argc, char *argv[])
 		nfds = socks[i] > nfds ? socks[i] : nfds;
 	}
 
-	struct can_frame cf = {CAN_EFF_FLAG, 8, {0, 0, 0, 0, 0, 0, 0, 0}};
-	while(1) {
+	struct can_frame cf = {CAN_EFF_FLAG, arguments.length, { 0 }};
+	do {
 		fd_set tmp_fds = fds;
 		if(select(nfds+1, NULL, &tmp_fds, NULL, NULL) < 0) {
 
@@ -92,12 +175,12 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		for(i = 0; i < argc-1; i++) {
+		for(i = 0; i < arguments.nifaces; i++) {
 			if(!FD_ISSET(socks[i], &tmp_fds)) {
 				continue;
 			}
 
-			memcpy(cf.data, &nums[i], sizeof(*nums));
+			memcpy(cf.data, &nums[i], arguments.length);
 
 			if(send(socks[i], &cf, sizeof(cf), 0) < 0) {
 
@@ -114,6 +197,8 @@ int main(int argc, char *argv[])
 
 			nums[i]++;
 		}
-	}
+	} while(!arguments.count || --arguments.count);
+
+	return EXIT_SUCCESS;
 }
 
