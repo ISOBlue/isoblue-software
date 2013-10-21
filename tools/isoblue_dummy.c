@@ -79,7 +79,7 @@ int main(int argc, char *argv[])
 	/* Print all received data */
 	while((chars = recv(bt, buf, sizeof(buf)-1, 0)) > 0) {
 		buf[chars] = '\0';
-		puts(buf);
+		fputs(buf, stdout);
 	}
 
 	/* Should not end */
