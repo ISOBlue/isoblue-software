@@ -3,7 +3,7 @@
  *
  * Definitions for ISOBUS CAN sockets
  *
- * Authors: Alex Layton <awlayton@purdue.edu>
+ * Authors: Alex Layton <alex@layton.in>
  *          Urs Thuermann   <urs.thuermann@volkswagen.de>
  *          Oliver Hartkopp <oliver.hartkopp@volkswagen.de>
  * Copyright (c) 2002-2007 Volkswagen Group Electronic Research

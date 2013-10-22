@@ -63,7 +63,7 @@ static __initconst const char banner[] =
 
 MODULE_DESCRIPTION("PF_CAN isobus 11783 protocol");
 MODULE_LICENSE("Dual BSD/GPL");
-MODULE_AUTHOR("Alex Layton <awlayton@purdue.edu>, "
+MODULE_AUTHOR("Alex Layton <alex@layton.in>, "
 		"Urs Thuermann <urs.thuermann@volkswagen.de>, "
 		"Oliver Hartkopp <oliver.hartkopp@volkswagen.de>");
 MODULE_ALIAS("can-proto-" __stringify(CAN_ISOBUS));
@@ -239,8 +239,8 @@ static void isobus_rcv(struct sk_buff *oskb, void *data)
 	}
 
 	/* Check for invalid PGNs */
-	if(ID_FIELD(cf->can_id, EDP)) {
-		if(ID_FIELD(cf->can_id, DP)) {
+	if (unlikely(ID_FIELD(cf->can_id, EDP))) {
+		if (likely(ID_FIELD(cf->can_id, DP))) {
 			/* 
 			 * Check for ISO 15765-3 PGNs which can coexist with ISO 11783 PGNs
 			 * but have a different format for the CAN identifier.
