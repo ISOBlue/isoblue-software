@@ -25,6 +25,7 @@ enum {
 	CAN_ISOBUS_LOOPBACK,	/* local loopback (default:on)       */
 	CAN_ISOBUS_RECV_OWN_MSGS,	/* receive my own msgs (default:off) */
 	CAN_ISOBUS_SEND_PRIO,	/* ISOBUS send priority 0:hi-7:low (default:6) */
+	CAN_ISOBUS_DADDR,	/* directed address of received ISOBUS message */
 };
 
 /* 
@@ -89,10 +90,6 @@ struct isobus_mesg {
 #define ISOBUS_PGN_REQUEST	59904LU
 #define ISOBUS_PGN_ADDR_CLAIMED	60928LU
 #define ISOBUS_PGN_COMMANDED_ADDR	65240LU
-/* Ancillary data */
-enum {
-	CAN_ISOBUS_DADDR,
-};
 
 #endif
 

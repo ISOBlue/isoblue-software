@@ -125,11 +125,12 @@ MODULE_ALIAS("can-proto-" __stringify(CAN_ISOBUS));
  */
 struct isobus_sock {
 	struct sock sk;
-	int bound;
+	bool bound;
 	int ifindex;
 	struct notifier_block notifier;
 	int loopback;
 	int recv_own_msgs;
+	int daddr_opt;
 	int count;                 /* number of active filters */
 	struct can_filter dfilter; /* default/single filter */
 	struct can_filter *filter; /* pointer to filter(s) */
@@ -480,7 +481,7 @@ static inline int isobus_send_addr_claimed(struct isobus_sock *ro)
 
 static inline void isobus_lose_addr(struct isobus_sock *ro)
 {
-	ro->bound = 0;
+	ro->bound = false;
 	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
 	ro->state = ISOBUS_LOST_ADDR;
 
@@ -728,7 +729,7 @@ static int isobus_notifier(struct notifier_block *nb,
 			kfree(ro->filter);
 
 		ro->ifindex = 0;
-		ro->bound   = 0;
+		ro->bound   = false;
 		ro->count   = 0;
 		release_sock(sk);
 
@@ -779,7 +780,7 @@ static int isobus_release(struct socket *sock)
 		kfree(ro->filter);
 
 	ro->ifindex = 0;
-	ro->bound   = 0;
+	ro->bound   = false;
 	ro->count   = 0;
 
 	sock_orphan(sk);
@@ -840,6 +841,27 @@ static inline int isobus_filter_conv(struct isobus_filter *fi,
 				fi[i].daddr, fi[i].daddr_mask,
 				fi[i].saddr, fi[i].saddr_mask,
 				f[i].can_id, f[i].can_mask);
+	}
+
+	return 0;
+}
+
+static inline int isobus_filter_unconv(struct can_filter *f,
+		struct isobus_filter *fi, int count)
+{
+	int i;
+
+	for(i = 0; i < count; i++) {
+		fi[i].pgn = get_pgn(f[i].can_id);
+		fi[i].pgn_mask = get_pgn(f[i].can_mask);
+
+		fi[i].daddr = ID_FIELD(f[i].can_id, PS);
+		fi[i].daddr_mask = ID_FIELD(f[i].can_mask, PS);
+
+		fi[i].saddr = ID_FIELD(f[i].can_id, SA);
+		fi[i].saddr_mask = ID_FIELD(f[i].can_mask, SA);
+
+		fi[i].inverted = f[i].can_id & CAN_INV_FILTER;
 	}
 
 	return 0;
@@ -936,7 +958,6 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 	case CAN_ISOBUS_LOOPBACK:
 		if (optlen != sizeof(ro->loopback))
 			return -EINVAL;
-
 		if (copy_from_user(&ro->loopback, optval, optlen))
 			return -EFAULT;
 		break;
@@ -944,7 +965,6 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 	case CAN_ISOBUS_RECV_OWN_MSGS:
 		if (optlen != sizeof(ro->recv_own_msgs))
 			return -EINVAL;
-
 		if (copy_from_user(&ro->recv_own_msgs, optval, optlen))
 			return -EFAULT;
 		break;
@@ -962,6 +982,13 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 		lock_sock(sk);
 		sk->sk_priority = SK_PRIO(tmp);
 		release_sock(sk);
+		break;
+
+	case CAN_ISOBUS_DADDR:
+		if (optlen != sizeof(ro->daddr_opt))
+			return -EINVAL;
+		if (copy_from_user(&ro->daddr_opt, optval, optlen))
+			return -EFAULT;
 		break;
 
 	default:
@@ -994,11 +1021,15 @@ static int isobus_getsockopt(struct socket *sock, int level, int optname,
 	case CAN_ISOBUS_FILTER:
 		lock_sock(sk);
 		if (ro->count > 0) {
-			int fsize = ro->count * sizeof(struct can_filter);
+			int fsize = ro->count * sizeof(struct isobus_filter);
+			struct isobus_filter *fi = kmalloc(fsize, GFP_KERNEL);
+			isobus_filter_unconv(ro->filter, fi, ro->count);
+
 			if (len > fsize)
 				len = fsize;
-			if (copy_to_user(optval, ro->filter, len))
+			if (copy_to_user(optval, fi, len))
 				err = -EFAULT;
+			kfree(fi);
 		} else
 			len = 0;
 		release_sock(sk);
@@ -1008,21 +1039,27 @@ static int isobus_getsockopt(struct socket *sock, int level, int optname,
 		return err;
 
 	case CAN_ISOBUS_LOOPBACK:
-		if (len > sizeof(int))
-			len = sizeof(int);
+		if (len > sizeof(ro->loopback))
+			len = sizeof(ro->loopback);
 		val = &ro->loopback;
 		break;
 
 	case CAN_ISOBUS_RECV_OWN_MSGS:
-		if (len > sizeof(int))
-			len = sizeof(int);
+		if (len > sizeof(ro->recv_own_msgs))
+			len = sizeof(ro->recv_own_msgs);
 		val = &ro->recv_own_msgs;
 		break;
 
 	case CAN_ISOBUS_SEND_PRIO:
-		if (len > sizeof(int))
-			len = sizeof(int);
+		if (len > sizeof(sk->sk_priority))
+			len = sizeof(sk->sk_priority);
 		tmp = ISOBUS_PRIO(sk->sk_priority);
+		break;
+
+	case CAN_ISOBUS_DADDR:
+		if (len > sizeof(ro->daddr_opt))
+			len = sizeof(ro->daddr_opt);
+		val = &ro->daddr_opt;
 		break;
 
 	default:
@@ -1219,7 +1256,7 @@ static int isobus_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 			}
 		}
 		ro->ifindex = ifindex;
-		ro->bound = 1;
+		ro->bound = true;
 	}
 
  out:
@@ -1243,11 +1280,11 @@ static int isobus_init(struct sock *sk)
 {
 	struct isobus_sock *ro = isobus_sk(sk);
 
-	ro->bound            = 0;
+	ro->bound            = false;
 	ro->ifindex          = 0;
 
 	/*
-	 * set default filter to single entry dfilter
+	 * Set default filter to single entry dfilter
 	 * ISOBUS only uses extended frame format
 	 */
 	ro->dfilter.can_id   = CAN_EFF_FLAG;
@@ -1255,9 +1292,9 @@ static int isobus_init(struct sock *sk)
 	ro->filter           = &ro->dfilter;
 	ro->count            = 1;
 
-	/* set default loopback behaviour */
-	ro->loopback         = 1;
-	ro->recv_own_msgs    = 0;
+	/* Set default loopback behaviour */
+	ro->loopback         = true;
+	ro->recv_own_msgs    = false;
 
 	/* Set default address */
 	ro->pref_addr = CAN_ISOBUS_ANY_ADDR;
@@ -1267,6 +1304,9 @@ static int isobus_init(struct sock *sk)
 
 	/* Set default priority */
 	sk->sk_priority = SK_PRIO(6);
+
+	/* Set default ancillary options */
+	ro->daddr_opt = false;
 
 	/* Set default state */
 	ro->state = ISOBUS_IDLE;

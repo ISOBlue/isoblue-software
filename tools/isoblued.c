@@ -642,8 +642,10 @@ int main(int argc, char *argv[]) {
 			return EXIT_FAILURE;
 		}
 
-		/* Timestamp frames */
 		const int val = 1;
+		/* Record directed address of messages */
+		setsockopt(s[i], SOL_CAN_ISOBUS, CAN_ISOBUS_DADDR, &val, sizeof(val));
+		/* Timestamp messages */
 		setsockopt(s[i], SOL_SOCKET, SO_TIMESTAMP, &val, sizeof(val));
 
 		FD_SET(s[i], &read_fds);
