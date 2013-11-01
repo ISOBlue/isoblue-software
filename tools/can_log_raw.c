@@ -62,11 +62,8 @@ void print_frame(FILE *fd, char interface[], struct timeval *ts,
 int main(int argc, char *argv[]) {
 	int s;
 	struct sockaddr_can addr;
-	socklen_t addr_len;
-	struct can_frame cf;
 	can_err_mask_t err_mask;
 	struct ifreq ifr;
-	struct timeval ts;
 	FILE *fo, *fe;
 
 	if((s = socket(PF_CAN, SOCK_RAW, CAN_RAW)) < 0) {
@@ -86,6 +83,10 @@ int main(int argc, char *argv[]) {
 	setsockopt(s, SOL_CAN_RAW, CAN_RAW_ERR_FILTER,
 			&err_mask, sizeof(err_mask));
 
+	/* Timestamp frames */
+	const int val = 1;
+	setsockopt(s, SOL_SOCKET, SO_TIMESTAMP, &val, sizeof(val));
+
 	/* Log to first argument as a file */
 	if(argc > 1) {
 		fo = fe = fopen(argv[1], "w");
@@ -94,25 +95,49 @@ int main(int argc, char *argv[]) {
 		fe = stderr;
 	}
 
+	/* Buffer received CAN frames */
+	struct can_frame cf;
+	struct msghdr msg = { 0 };
+	struct iovec iov = { 0 };
+	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval))];
+
+	/* Construct msghdr to use to recevie messages from socket */
+	msg.msg_name = &addr;
+	msg.msg_namelen = sizeof(addr);
+	msg.msg_iov = &iov;
+	msg.msg_control = ctrlmsg;
+	msg.msg_controllen = sizeof(ctrlmsg);
+	msg.msg_iovlen = 1;
+	iov.iov_base = &cf;
+	iov.iov_len = sizeof(cf);
 	while(1) {
 		/* Print received CAN frames */
-		addr_len = sizeof(addr);
-		if(recvfrom(s, &cf, sizeof(cf), 0,
-					(struct sockaddr *)&addr, &addr_len) > 0) {
+		if(recvmsg(s, &msg, 0) <= 0) {
+			perror("recvmsg");
+			continue;
+		}
 
-			/* Find approximate receive time */
-			gettimeofday(&ts, NULL);
-
-			/* Find name of receive interface */
-			ifr.ifr_ifindex = addr.can_ifindex;
-			ioctl(s, SIOCGIFNAME, &ifr);
-
-			/* Print fames to STDOUT, errors to STDERR */
-			if(cf.can_id & CAN_ERR_FLAG) {
-				print_frame(fe, ifr.ifr_name, &ts, &cf);
-			} else {
-				print_frame(fo, ifr.ifr_name, &ts, &cf);
+		/* Find approximate receive time */
+		struct cmsghdr *cmsg;
+		struct timeval tv = { 0 };
+		for(cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+				cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+			if(cmsg->cmsg_level == SOL_SOCKET &&
+					cmsg->cmsg_type == SO_TIMESTAMP) {
+				memcpy(&tv, CMSG_DATA(cmsg), sizeof(tv));
+				break;
 			}
+		}
+
+		/* Find name of receive interface */
+		ifr.ifr_ifindex = addr.can_ifindex;
+		ioctl(s, SIOCGIFNAME, &ifr);
+
+		/* Print fames to STDOUT, errors to STDERR */
+		if(cf.can_id & CAN_ERR_FLAG) {
+			print_frame(fe, ifr.ifr_name, &tv, &cf);
+		} else {
+			print_frame(fo, ifr.ifr_name, &tv, &cf);
 		}
 	}
 

@@ -2,7 +2,7 @@
  * Circular Buffer Library
  *
  *
- * Author: Alex Layton <awlayton@purdue.edu>
+ * Author: Alex Layton <alex@layton.in>
  *
  * Copyright (C) 2013 Purdue University
  *
@@ -65,7 +65,7 @@ int ring_buffer_create(struct ring_buffer *buffer, unsigned long order,
 	//lseek(buffer->fd, -FOOTER_LEN, SEEK_END);
 	//read(buffer->fd, &buffer->head_offset, sizeof(buffer->head_offset));
 	//read(buffer->fd, &buffer->tail_offset, sizeof(buffer->tail_offset));
-	buffer->start_offset = buffer->tail_offset = 0;
+	buffer->start_offset = buffer->head_offset = 0;
 	buffer->curs_offset = buffer->tail_offset = 0;
 
 	buffer->address = mmap(NULL, buffer->count_bytes << 1, PROT_NONE,

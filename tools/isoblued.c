@@ -4,7 +4,7 @@
  * Enables getting at ISOBUS messages over Bluetooth.
  *
  *
- * Author: Alex Layton <awlayton@purdue.edu>
+ * Author: Alex Layton <alex@layton.in>
  *
  * Copyright (C) 2013 Purdue University
  *
@@ -27,7 +27,7 @@
  * IN THE SOFTWARE.
  */
 
-#define ISOBLUED_VER	"isoblued - ISOBlue daemon 0.3.0"
+#define ISOBLUED_VER	"isoblued - ISOBlue daemon 0.3.1"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -240,62 +240,93 @@ static inline int wait_func(int n_fds, fd_set *tmp_rfds, fd_set *tmp_wfds)
 	return ret;
 }
 
+/* Fast method to convert to hex */
+static inline char nib2hex(uint_fast8_t nib)
+{
+	nib &= 0x0F;
+
+	return nib >= 10 ? nib - 10 + 'a' : nib + '0'; 
+}
+
 /* Function to handle incoming ISOBUS message(s) */
 static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 {
-	struct isobus_mesg mes = { 0 };
-	struct sockaddr_can addr = { 0 };
-	struct timeval ts;
-
-	/* Buffer received CAN frames */
-	struct msghdr msg = { 0 };
-	struct iovec iov = { 0 };
-	char ctrlmsg[CMSG_SPACE(sizeof(struct sockaddr_can))];
 	/* Construct msghdr to use to recevie messages from socket */
-	msg.msg_name = &addr;
-	msg.msg_namelen = sizeof(addr);
-	msg.msg_iov = &iov;
-	msg.msg_control = ctrlmsg;
-	msg.msg_controllen = sizeof(ctrlmsg);
-	msg.msg_iovlen = 1;
-	iov.iov_base = &mes;
-	iov.iov_len = sizeof(mes);
+	static struct isobus_mesg mes;
+	static struct sockaddr_can addr;
+	static struct iovec iov = {&mes, sizeof(mes)};
+	static char cmsgb[CMSG_SPACE(sizeof(struct sockaddr_can)) +
+		CMSG_SPACE(sizeof(struct timeval))];
+	static struct msghdr msg = {&addr, sizeof(addr), &iov, 1,
+			cmsgb, sizeof(cmsgb), 0};
 
 	if(recvmsg(sock, &msg, MSG_DONTWAIT) <= 0) {
 		perror("recvmsg");
-		exit(0);
+		exit(EXIT_FAILURE);
 	}
 
-	/* Get saddr */
+	/* Get saddr and approximate arrival time */
 	struct sockaddr_can daddr = { 0 };
+	struct timeval tv = { 0 };
 	struct cmsghdr *cmsg;
 	for(cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
 			cmsg = CMSG_NXTHDR(&msg, cmsg)) {
 		if(cmsg->cmsg_level == SOL_CAN_ISOBUS &&
 				cmsg->cmsg_type == CAN_ISOBUS_DADDR) {
 			memcpy(&daddr, CMSG_DATA(cmsg), sizeof(daddr));
-			break;
+		} else if(cmsg->cmsg_level == SOL_SOCKET &&
+				cmsg->cmsg_type == SO_TIMESTAMP) {
+			memcpy(&tv, CMSG_DATA(cmsg), sizeof(tv));
 		}
 	}
 
-	/* Find approximate receive time */
-	gettimeofday(&ts, NULL);
-
-	/* Print messages */
 	char *sp, *cp;
-	int j;
-
 	cp = sp = ring_buffer_tail_address(buf);
 
-	cp += sprintf(cp, "%d %06d %d ", iface, mes.pgn, mes.dlen);
+	/* Print CAN interface index (1 nibble) */
+	*(cp++) = nib2hex(iface);
+	/* Print PGN (5 nibbles) */
+	*(cp++) = nib2hex(mes.pgn >> 16);
+	*(cp++) = nib2hex(mes.pgn >> 12);
+	*(cp++) = nib2hex(mes.pgn >> 8);
+	*(cp++) = nib2hex(mes.pgn >> 4);
+	*(cp++) = nib2hex(mes.pgn);
+	/* Print destination address (2 nibbles) */
+	*(cp++) = nib2hex(daddr.can_addr.isobus.addr >> 4);
+	*(cp++) = nib2hex(daddr.can_addr.isobus.addr);
+	/* Print data bytes (4 nibbles length) */
+	*(cp++) = nib2hex(mes.dlen >> 12);
+	*(cp++) = nib2hex(mes.dlen >> 8);
+	*(cp++) = nib2hex(mes.dlen >> 4);
+	*(cp++) = nib2hex(mes.dlen);
+	int j;
 	for(j = 0; j < mes.dlen; j++)
 	{
-		cp += sprintf(cp,"%02x ", mes.data[j]);
+		*(cp++) = nib2hex(mes.data[j] >> 4);
+		*(cp++) = nib2hex(mes.data[j]);
 	}
-	cp += sprintf(cp, "%ld.%06ld %02x %02x\n", ts.tv_sec, ts.tv_usec,
-			addr.can_addr.isobus.addr, daddr.can_addr.isobus.addr);
+	/* Print timestamp (8 nibbles sec, 5 nibbles usec) */
+	*(cp++) = nib2hex(tv.tv_sec >> 28);
+	*(cp++) = nib2hex(tv.tv_sec >> 24);
+	*(cp++) = nib2hex(tv.tv_sec >> 20);
+	*(cp++) = nib2hex(tv.tv_sec >> 16);
+	*(cp++) = nib2hex(tv.tv_sec >> 12);
+	*(cp++) = nib2hex(tv.tv_sec >> 8);
+	*(cp++) = nib2hex(tv.tv_sec >> 4);
+	*(cp++) = nib2hex(tv.tv_sec);
+	*(cp++) = nib2hex(tv.tv_usec >> 16);
+	*(cp++) = nib2hex(tv.tv_usec >> 12);
+	*(cp++) = nib2hex(tv.tv_usec >> 8);
+	*(cp++) = nib2hex(tv.tv_usec >> 4);
+	*(cp++) = nib2hex(tv.tv_usec);
+	/* Print source address (2 nibbles) */
+	*(cp++) = nib2hex(addr.can_addr.isobus.addr >> 4);
+	*(cp++) = nib2hex(addr.can_addr.isobus.addr);
+	/* Print message ending */
+	*(cp++) = '\n';
+	//*(cp++) = '\0';
 
-	ring_buffer_tail_advance(buf, cp-sp+1);
+	ring_buffer_tail_advance(buf, cp-sp);
 
 	return 1;
 }
@@ -308,7 +339,7 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 
 	/* Send one message (or part of one) at a time */
 	buffer = ring_buffer_curs_address(buf);
-	chars = strlen(buffer);
+	chars = ring_buffer_unread_bytes(buf);
 
 	if((sent = send(rc, buffer, chars, MSG_DONTWAIT)) < 0) {
 		perror("send");
@@ -322,11 +353,7 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 		}
 	}
 
-	/*
-	 * If done, need to skip over the null character as well,
-	 * otherwise just skip what was sent
-	 */
-	ring_buffer_curs_advance(buf, chars == sent ? chars+1 : sent);
+	ring_buffer_curs_advance(buf, sent);
 
 	return 1;
 }
@@ -335,7 +362,7 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 {
 	/* Buffer for reassembling commands */
-	#define CMD_BUF_SIZE	0x01FFFF
+	#define CMD_BUF_SIZE	0x03FFFF
 	static char buffer[CMD_BUF_SIZE] = { 0 };
 	static int curs = 0, tail = 0;
 
@@ -362,21 +389,28 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	}
 
 	char op;
-	char *args;
+	int sock;
+	char *args, *end;
+	bool invalid;
+
 	op = buffer[0];
-	args = buffer+2;
+	sock = buffer[1] >= 'a' ? buffer[1] + 10 - 'a' : buffer[1] - '0';
+	args = buffer + 2;
+	end = buffer + curs;
+	invalid = false;
 
 	switch(op) {
 	case SET_FILTERS:
 	{
-		int sock;
-		int nchars;
 		char *p;
 		struct isobus_filter *filts;
 		int nfilts;
 
-		sscanf(args, "%d %d %n", &sock, &nfilts, &nchars);
-		p = args + nchars;
+		if(sscanf(args, "%5x", &nfilts) < 1) {
+			fprintf(stderr, "Invalid filter command\n");
+			break;
+		}
+		p = args + 5;
 
 		if(nfilts == 0) {
 			/* Receive everything when 0 filters given */
@@ -396,19 +430,26 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 			for(i = 0; i < nfilts; i++) {
 				int pgn;
 
-				sscanf(p, "%d%n", &pgn, &nchars);
-				p += nchars;
+				if((p + 5) >= end || sscanf(p, "%5x", &pgn) < 1) {
+					invalid = true;
+					fprintf(stderr, "Invalid filter command\n");
+					break;
+				}
+				p += 5;
 
 				filts[i].pgn = pgn;
 				filts[i].pgn_mask = CAN_ISOBUS_PGN_MASK;
 			}
 		}
-		if(setsockopt(s[sock], SOL_CAN_ISOBUS, CAN_ISOBUS_FILTER, filts,
-					nfilts * sizeof(*filts)) < 0) {
-			perror("setsockopt");
+		if(!invalid) {
+			if(setsockopt(s[sock], SOL_CAN_ISOBUS, CAN_ISOBUS_FILTER, filts,
+						nfilts * sizeof(*filts)) < 0) {
+				perror("setsockopt");
+			}
+
+			ring_buffer_clear(buf);
 		}
 
-		ring_buffer_clear(buf);
 		free(filts);
 		break;
 	}
@@ -420,9 +461,8 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 		int pgn;
 		int len;
 		int dest;
-		int sock;
 
-		sscanf(args, "%d %d %d %d %n", &sock, &dest, &pgn, &len, &nchars);
+		sscanf(args, "%5x%2x%4x%n", &pgn, &dest, &len, &nchars);
 		p = args + nchars;
 
 		int i;
@@ -601,6 +641,12 @@ int main(int argc, char *argv[]) {
 			perror("bind can");
 			return EXIT_FAILURE;
 		}
+
+		const int val = 1;
+		/* Record directed address of messages */
+		setsockopt(s[i], SOL_CAN_ISOBUS, CAN_ISOBUS_DADDR, &val, sizeof(val));
+		/* Timestamp messages */
+		setsockopt(s[i], SOL_SOCKET, SO_TIMESTAMP, &val, sizeof(val));
 
 		FD_SET(s[i], &read_fds);
 		n_fds = s[i] > n_fds ? s[i] : n_fds;

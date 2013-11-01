@@ -2,7 +2,7 @@
  * Circular Buffer Library
  *
  *
- * Author: Alex Layton <awlayton@purdue.edu>
+ * Author: Alex Layton <alex@layton.in>
  *
  * Copyright (C) 2013 Purdue University
  *
@@ -27,6 +27,10 @@
 
 #ifndef CIRC_BUF_H
 #define CIRC_BUF_H
+
+#ifdef	__cplusplus
+extern "C" {
+#endif
 
 /* #include <pthread.h> */
 
@@ -68,5 +72,9 @@ unsigned long ring_buffer_unread_bytes(struct ring_buffer *buffer);
 void ring_buffer_wait_unread_bytes(struct ring_buffer *buffer);
 unsigned long ring_buffer_free_bytes(struct ring_buffer *buffer);
 void ring_buffer_clear(struct ring_buffer *buffer);
+
+#ifdef	__cplusplus
+}
+#endif
 
 #endif /* CIRC_BUF_H */
