@@ -438,7 +438,7 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 				p += 5;
 
 				filts[i].pgn = pgn;
-				filts[i].pgn_mask = CAN_ISOBUS_PGN_MASK;
+				filts[i].pgn_mask = ISOBUS_PGN_MASK;
 			}
 		}
 		if(!invalid) {
@@ -635,7 +635,7 @@ int main(int argc, char *argv[]) {
 		ioctl(s[i], SIOCGIFINDEX, &ifr);
 		addr.can_family  = AF_CAN;
 		addr.can_ifindex = ifr.ifr_ifindex; 
-		addr.can_addr.isobus.addr = CAN_ISOBUS_ANY_ADDR;
+		addr.can_addr.isobus.addr = ISOBUS_ANY_ADDR;
 
 		if(bind(s[i], (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 			perror("bind can");

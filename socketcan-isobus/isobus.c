@@ -57,16 +57,16 @@
 #include <net/sock.h>
 #include <net/net_namespace.h>
 
-#define CAN_ISOBUS_VERSION CAN_VERSION
+#define ISOBUS_VERSION CAN_VERSION
 static __initconst const char banner[] =
-	KERN_INFO "can: isobus protocol (rev " CAN_ISOBUS_VERSION ")\n";
+	KERN_INFO "can: isobus protocol (rev " ISOBUS_VERSION ")\n";
 
 MODULE_DESCRIPTION("PF_CAN isobus 11783 protocol");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Alex Layton <alex@layton.in>, "
 		"Urs Thuermann <urs.thuermann@volkswagen.de>, "
 		"Oliver Hartkopp <oliver.hartkopp@volkswagen.de>");
-MODULE_ALIAS("can-proto-" __stringify(CAN_ISOBUS));
+MODULE_ALIAS("can-proto-" __stringify(ISOBUS));
 #ifdef BUILD_NUM
 	MODULE_INFO(build, BUILD_NUM);
 #endif
@@ -102,6 +102,24 @@ MODULE_ALIAS("can-proto-" __stringify(CAN_ISOBUS));
 #define ISOBUS_MIN_PDU2	240
 #define ID_PDU_FMT(id) (ID_FIELD(id, PF) < ISOBUS_MIN_PDU2 ? 1 : 2)
 #define PGN_PDU_FMT(pgn)	ID_PDU_FMT(pgn << ISOBUS_PGN_POS)
+
+/* Stuff for NAME fields */
+#define ISOBUS_NAME_ID_MASK	0x00000000001FFFFFLU
+#define ISOBUS_NAME_ID_POS	0
+#define ISOBUS_NAME_MAN_MASK	0x00000000FFE00000LU
+#define ISOBUS_NAME_MAN_POS	21
+#define ISOBUS_NAME_ECU_MASK	0x0000000700000000LU
+#define ISOBUS_NAME_ECU_POS	32
+#define ISOBUS_NAME_FINST_MASK	0x000000F800000000LU
+#define ISOBUS_NAME_FINST_POS	35
+#define ISOBUS_NAME_FUNC_MASK	0x0000FF0000000000LU
+#define ISOBUS_NAME_FUNC_POS	40
+#define ISOBUS_NAME_CLASS_MASK	0x00FE000000000000LU
+#define ISOBUS_NAME_CLASS_POS	49
+#define ISOBUS_NAME_CINST_MASK	0x0F00000000000000LU
+#define ISOBUS_NAME_CINST_POS	56
+#define ISOBUS_NAME_IG_MASK	0x7000000000000000LU
+#define ISOBUS_NAME_IG_POS	60
 
 /* Timeouts etc. (100's on ns) */
 #define ISOBUS_ADDR_CLAIM_TIMEOUT	2500L
@@ -469,9 +487,9 @@ static inline int isobus_send_addr_claimed(struct isobus_sock *ro)
 
 	mesg = addr_claimed_mesg;
 	*(uint64_t *)mesg.data = NAME2DATA(ro->name);
-	ret = isobus_send(ro, &mesg, CAN_ISOBUS_GLOBAL_ADDR);
+	ret = isobus_send(ro, &mesg, ISOBUS_GLOBAL_ADDR);
 
-	if(ro->s_addr == CAN_ISOBUS_NULL_ADDR)
+	if(ro->s_addr == ISOBUS_NULL_ADDR)
 		printk(KERN_DEBUG "can_isobus:%p cannot claim address sent\n", ro);
 	else
 		printk(KERN_DEBUG "can_isobus:%p address claimed sent\n", ro);
@@ -482,7 +500,7 @@ static inline int isobus_send_addr_claimed(struct isobus_sock *ro)
 static inline void isobus_lose_addr(struct isobus_sock *ro)
 {
 	ro->bound = false;
-	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+	ro->s_addr = ISOBUS_NULL_ADDR;
 	ro->state = ISOBUS_LOST_ADDR;
 
 	isobus_send_addr_claimed(ro);
@@ -512,7 +530,7 @@ static void isobus_addr_claimed_handler(struct sk_buff *skb, void *data)
 	sa = ID_FIELD(cf->can_id, SA);
 
 	/* No action for cannot claim address messages */
-	if(sa == CAN_ISOBUS_NULL_ADDR)
+	if(sa == ISOBUS_NULL_ADDR)
 		return;
 
 	if(ro->state == ISOBUS_WAIT_ADDR) {
@@ -528,7 +546,7 @@ static void isobus_addr_claimed_handler(struct sk_buff *skb, void *data)
 				wake_up_interruptible(&ro->wait);
 			} else {
 				ro->pref_avail = false;
-				if(!(ro->name & CAN_ISOBUS_SC_MASK))
+				if(!(ro->name & ISOBUS_NAME_SC_BIT))
 					isobus_lose_addr(ro);
 			}
 		}
@@ -571,7 +589,7 @@ static void isobus_req_addr_claimed_handler(struct sk_buff *skb, void *data)
 	/* Check if claimed address is mine */
 	/* TODO: Should this check be done with filters? */
 	if(ID_FIELD(cf->can_id, PS) == ro->s_addr ||
-			ID_FIELD(cf->can_id, PS) == CAN_ISOBUS_GLOBAL_ADDR) {
+			ID_FIELD(cf->can_id, PS) == ISOBUS_GLOBAL_ADDR) {
 		printk(KERN_DEBUG "can_isobus:%p request for address claimed seen\n",
 				ro);
 		isobus_send_addr_claimed(ro);
@@ -619,7 +637,7 @@ static int isobus_enable_nmfilters(struct net_device *dev, struct sock *sk)
 	int err;
 
 	err = can_rx_register(dev,
-			CANID(0, ISOBUS_PGN_ADDR_CLAIMED, CAN_ISOBUS_GLOBAL_ADDR, 0),
+			CANID(0, ISOBUS_PGN_ADDR_CLAIMED, ISOBUS_GLOBAL_ADDR, 0),
 			CANID(0, ISOBUS_PGN1_MASK, ISOBUS_PS_MASK, 0),
 			isobus_addr_claimed_handler, sk, "isobus-nm");
 	if(err) {
@@ -632,7 +650,7 @@ static int isobus_enable_nmfilters(struct net_device *dev, struct sock *sk)
 			isobus_req_addr_claimed_handler, sk, "isobus-nm");
 	if(err) {
 		can_rx_unregister(dev,
-				CANID(0, ISOBUS_PGN_ADDR_CLAIMED, CAN_ISOBUS_GLOBAL_ADDR, 0),
+				CANID(0, ISOBUS_PGN_ADDR_CLAIMED, ISOBUS_GLOBAL_ADDR, 0),
 				CANID(0, ISOBUS_PGN1_MASK, ISOBUS_PS_MASK, 0),
 				isobus_addr_claimed_handler, sk);
 	}
@@ -664,7 +682,7 @@ static inline void isobus_disable_nmfilters(struct net_device *dev,
 		struct sock *sk)
 {
 	can_rx_unregister(dev,
-			CANID(0, ISOBUS_PGN_ADDR_CLAIMED, CAN_ISOBUS_GLOBAL_ADDR, 0),
+			CANID(0, ISOBUS_PGN_ADDR_CLAIMED, ISOBUS_GLOBAL_ADDR, 0),
 			CANID(0, ISOBUS_PGN1_MASK, ISOBUS_PS_MASK, 0),
 			isobus_addr_claimed_handler, sk);
 	can_rx_unregister(dev, 
@@ -826,7 +844,7 @@ static inline int isobus_filter_conv(struct isobus_filter *fi,
 				return -EINVAL;
 			}
 		} else {
-			pgn_mask &= CAN_ISOBUS_PGN1_MASK;
+			pgn_mask &= ISOBUS_PGN1_MASK;
 		}
 
 		f[i].can_id = CANID(0, fi[i].pgn, fi[i].daddr, fi[i].saddr);
@@ -991,6 +1009,13 @@ static int isobus_setsockopt(struct socket *sock, int level, int optname,
 			return -EFAULT;
 		break;
 
+	case CAN_ISOBUS_NAME:
+		if (optlen != sizeof(ro->name))
+			return -EINVAL;
+		if (copy_from_user(&ro->name, optval, optlen))
+			return -EFAULT;
+		break;
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -1062,6 +1087,12 @@ static int isobus_getsockopt(struct socket *sock, int level, int optname,
 		val = &ro->daddr_opt;
 		break;
 
+	case CAN_ISOBUS_NAME:
+		if (len > sizeof(ro->name))
+			len = sizeof(ro->name);
+		val = &ro->name;
+		break;
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -1111,7 +1142,7 @@ static int isobus_recvmsg(struct kiocb *iocb, struct socket *sock,
 	sock_recv_ts_and_drops(msg, sk, skb);
 
 	/* Create ancillary header with the source CAN address */
-	put_cmsg(msg, SOL_CAN_ISOBUS,  CAN_ISOBUS_DADDR,
+	put_cmsg(msg, SOL_CAN_ISOBUS, CAN_ISOBUS_DADDR,
 			sizeof(struct sockaddr_can), &addr[1]);
  
 	if (msg->msg_name) {
@@ -1137,20 +1168,20 @@ static inline __u8 avail_sc_addr(struct isobus_sock *ro)
 		}
 	}
 
-	return CAN_ISOBUS_NULL_ADDR;
+	return ISOBUS_NULL_ADDR;
 }
 
 static inline int isobus_claim_addr(struct isobus_sock *ro)
 {
 	long wait;
 	
-	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+	ro->s_addr = ISOBUS_NULL_ADDR;
 	ro->state = ISOBUS_WAIT_ADDR;
 	memset(ro->sc_addrs, -1, sizeof(ro->sc_addrs));
 	ro->pref_avail = true;
 	/* Send request for address claimed message */
 	isobus_send(ro, (struct isobus_mesg *)&req_addr_claimed_mesg,
-			CAN_ISOBUS_GLOBAL_ADDR);
+			ISOBUS_GLOBAL_ADDR);
 	printk(KERN_DEBUG "can_isobus:%p request for address claimed sent\n", ro);
 
 	/* Wait until we have tried to claim an address */
@@ -1164,12 +1195,12 @@ static inline int isobus_claim_addr(struct isobus_sock *ro)
 		return -EADDRINUSE;
 
 	/* See if there was an address available */
-	if(ro->pref_addr != CAN_ISOBUS_ANY_ADDR && ro->pref_avail)
+	if(ro->pref_addr != ISOBUS_ANY_ADDR && ro->pref_avail)
 		ro->s_addr = ro->pref_addr;
-	else if(ro->name & CAN_ISOBUS_SC_MASK)
+	else if(ro->name & ISOBUS_NAME_SC_BIT)
 		ro->s_addr = avail_sc_addr(ro);
 
-	if(ro->s_addr == CAN_ISOBUS_NULL_ADDR) {
+	if(ro->s_addr == ISOBUS_NULL_ADDR) {
 		isobus_lose_addr(ro);
 		return -EADDRINUSE;
 	}
@@ -1297,10 +1328,22 @@ static int isobus_init(struct sock *sk)
 	ro->recv_own_msgs    = false;
 
 	/* Set default address */
-	ro->pref_addr = CAN_ISOBUS_ANY_ADDR;
-	ro->s_addr = CAN_ISOBUS_NULL_ADDR;
+	ro->pref_addr = ISOBUS_ANY_ADDR;
+	ro->s_addr = ISOBUS_NULL_ADDR;
+
+	/* Generate NAME with random identity/instance numbers */
 	get_random_bytes(&ro->name, sizeof(ro->name));
-	ro->name |= CAN_ISOBUS_SC_MASK;
+	ro->name &= ISOBUS_NAME_CINST_MASK | ISOBUS_NAME_FINST_MASK |
+			ISOBUS_NAME_ID_MASK;
+	/* 
+	 * Default manufacturer to all 1's
+	 * TODO: Find a better way to handle this?
+	 */
+	ro->name |= ISOBUS_NAME_MAN_MASK;
+	/* Default function to data logger */
+	ro->name |= (130LU << ISOBUS_NAME_FUNC_POS) & ISOBUS_NAME_FUNC_MASK;
+	/* Default to self-configurable address */
+	ro->name |= ISOBUS_NAME_SC_BIT;
 
 	/* Set default priority */
 	sk->sk_priority = SK_PRIO(6);
@@ -1341,7 +1384,7 @@ static const struct proto_ops isobus_ops = {
 };
 
 static struct proto isobus_proto __read_mostly = {
-	.name       = "CAN_ISOBUS",
+	.name       = "ISOBUS",
 	.owner      = THIS_MODULE,
 	.obj_size   = sizeof(struct isobus_sock),
 	.init       = isobus_init,
