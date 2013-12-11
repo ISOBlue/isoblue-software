@@ -4,6 +4,7 @@ PREFIX := /usr
 CFLAGS := -Wall -Wextra -O3 $(CFLAGS)
 
 all : $(TOOLS) $(TEST)
+.PHONY : all
 
 include ../buildnum.mk
 
@@ -14,8 +15,9 @@ ring_buf.o : ring_buf.c ring_buf.h
 
 install : $(TOOLS:%=install_%)
 
-install_% :
+install_% : %
 	install $* $(PREFIX)/bin/$*
 
+.PHONY : clean
 clean ::
 	-$(RM) $(TOOLS) $(TEST) *.o
