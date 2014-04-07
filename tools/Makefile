@@ -9,6 +9,7 @@ all : $(TOOLS) $(TEST)
 include ../buildnum.mk
 
 isoblued isoblue_dummy : LDLIBS += -lbluetooth
+isoblued : LDLIBS += -lleveldb
 isoblued : ring_buf.o
 
 ring_buf.o : ring_buf.c ring_buf.h

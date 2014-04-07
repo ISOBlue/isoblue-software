@@ -46,6 +46,8 @@
 #include <bluetooth/sdp.h>
 #include <bluetooth/sdp_lib.h>
 #include <bluetooth/rfcomm.h>
+
+#include <leveldb/c.h>
  
 #include "../socketcan-isobus/patched/can.h"
 #include "../socketcan-isobus/isobus.h"
@@ -209,6 +211,20 @@ static struct argp argp = {
 	NULL
 };
 
+/* Leveldb stuff */
+leveldb_t *db;
+leveldb_options_t *db_options;
+leveldb_readoptions_t *db_roptions;
+leveldb_writeoptions_t *db_woptions;
+char *db_err = NULL;
+size_t db_id = 0;
+struct db_val {
+	int iface;
+	struct timeval tv;
+	uint8_t saddr, daddr;
+	struct isobus_mesg mes;
+};
+
 /* Function to check if any messages are buffered */
 static inline void check_send(struct ring_buffer *buf, int rc,
 		fd_set *write_fds)
@@ -251,10 +267,10 @@ static inline char nib2hex(uint_fast8_t nib)
 /* Function to handle incoming ISOBUS message(s) */
 static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 {
+	static struct db_val db_val = { 0 };
 	/* Construct msghdr to use to recevie messages from socket */
-	static struct isobus_mesg mes;
 	static struct sockaddr_can addr;
-	static struct iovec iov = {&mes, sizeof(mes)};
+	static struct iovec iov = {&db_val.mes, sizeof(db_val.mes)};
 	static char cmsgb[CMSG_SPACE(sizeof(struct sockaddr_can)) +
 		CMSG_SPACE(sizeof(struct timeval))];
 	static struct msghdr msg = {&addr, sizeof(addr), &iov, 1,
@@ -286,26 +302,26 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	/* Print CAN interface index (1 nibble) */
 	*(cp++) = nib2hex(iface);
 	/* Print PGN (5 nibbles) */
-	*(cp++) = nib2hex(mes.pgn >> 16);
-	*(cp++) = nib2hex(mes.pgn >> 12);
-	*(cp++) = nib2hex(mes.pgn >> 8);
-	*(cp++) = nib2hex(mes.pgn >> 4);
-	*(cp++) = nib2hex(mes.pgn);
+	*(cp++) = nib2hex(db_val.mes.pgn >> 16);
+	*(cp++) = nib2hex(db_val.mes.pgn >> 12);
+	*(cp++) = nib2hex(db_val.mes.pgn >> 8);
+	*(cp++) = nib2hex(db_val.mes.pgn >> 4);
+	*(cp++) = nib2hex(db_val.mes.pgn);
 	/* Print destination address (2 nibbles) */
 	*(cp++) = nib2hex(daddr.can_addr.isobus.addr >> 4);
 	*(cp++) = nib2hex(daddr.can_addr.isobus.addr);
 	/* Print data bytes (4 nibbles length) */
-	*(cp++) = nib2hex(mes.dlen >> 12);
-	*(cp++) = nib2hex(mes.dlen >> 8);
-	*(cp++) = nib2hex(mes.dlen >> 4);
-	*(cp++) = nib2hex(mes.dlen);
+	*(cp++) = nib2hex(db_val.mes.dlen >> 12);
+	*(cp++) = nib2hex(db_val.mes.dlen >> 8);
+	*(cp++) = nib2hex(db_val.mes.dlen >> 4);
+	*(cp++) = nib2hex(db_val.mes.dlen);
 	int j;
-	for(j = 0; j < mes.dlen; j++)
+	for(j = 0; j < db_val.mes.dlen; j++)
 	{
-		*(cp++) = nib2hex(mes.data[j] >> 4);
-		*(cp++) = nib2hex(mes.data[j]);
+		*(cp++) = nib2hex(db_val.mes.data[j] >> 4);
+		*(cp++) = nib2hex(db_val.mes.data[j]);
 	}
-	/* Print timestamp (8 nibbles sec, 5 nibbles usec) */
+	/* Print tidb_val.mestamp (8 nibbles sec, 5 nibbles usec) */
 	*(cp++) = nib2hex(tv.tv_sec >> 28);
 	*(cp++) = nib2hex(tv.tv_sec >> 24);
 	*(cp++) = nib2hex(tv.tv_sec >> 20);
@@ -322,11 +338,16 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	/* Print source address (2 nibbles) */
 	*(cp++) = nib2hex(addr.can_addr.isobus.addr >> 4);
 	*(cp++) = nib2hex(addr.can_addr.isobus.addr);
-	/* Print message ending */
+	/* Print db_val.message ending */
 	*(cp++) = '\n';
 	//*(cp++) = '\0';
 
 	ring_buffer_tail_advance(buf, cp-sp);
+
+	/* Put messaged in leveldb */
+	leveldb_put(db, db_woptions, (char *)&db_id, sizeof(db_id),
+			(char *)&db_val, sizeof(db_val), &db_err);
+	db_id++;
 
 	return 1;
 }
@@ -651,6 +672,18 @@ int main(int argc, char *argv[]) {
 		FD_SET(s[i], &read_fds);
 		n_fds = s[i] > n_fds ? s[i] : n_fds;
 	}
+
+	/* Initialize Leveldb */
+	db_options = leveldb_options_create();
+	leveldb_options_set_create_if_missing(db_options, 1);
+	db = leveldb_open(db_options, "isoblued_db", &db_err);
+	if(db_err) {
+		fprintf(stderr, "Leveldb open error.\n");
+		exit(EXIT_FAILURE);
+	}
+	leveldb_free(db_err);
+	db_err = NULL;
+	db_woptions = leveldb_writeoptions_create();
 
 	/* Do socket stuff */
 	loop_func(n_fds, read_fds, write_fds, buf, s, ns, bt);
