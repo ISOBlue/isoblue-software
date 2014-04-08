@@ -76,6 +76,13 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+	/* Send past data command to ISOBlue */
+	static const char past_cmd[] = "P00000000100000010\n";
+	if(send(bt, past_cmd, strlen(past_cmd), MSG_WAITALL) != strlen(past_cmd)) {
+		perror("send");
+		return EXIT_FAILURE;
+	}
+
 	/* Print all received data */
 	while((chars = recv(bt, buf, sizeof(buf)-1, 0)) > 0) {
 		buf[chars] = '\0';
