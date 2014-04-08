@@ -59,6 +59,8 @@ enum opcode {
 	SEND_MESG = 'W',
 	MESG = 'M',
 	ACK = 'A',
+	GET_PAST = 'P',
+	OLD_MESG = 'O',
 };
 
 /* Registers isoblued with the SDP server */
@@ -219,13 +221,12 @@ leveldb_options_t *db_options;
 leveldb_readoptions_t *db_roptions;
 leveldb_writeoptions_t *db_woptions;
 char *db_err = NULL;
-size_t db_id = 0;
-struct db_val {
-	int iface;
-	struct timeval tv;
-	uint8_t saddr, daddr;
-	struct isobus_mesg mes;
-};
+typedef uint32_t db_key_t;
+db_key_t db_id = 1, db_stop = 0;
+leveldb_iterator_t *db_iter;
+/* Magic numbers related to past data... */
+#define PAST_THRESH	200
+#define PAST_CNT	4
 
 /* Function to check if any messages are buffered */
 static inline void check_send(struct ring_buffer *buf, int rc,
@@ -269,10 +270,10 @@ static inline char nib2hex(uint_fast8_t nib)
 /* Function to handle incoming ISOBUS message(s) */
 static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 {
-	static struct db_val db_val = { 0 };
 	/* Construct msghdr to use to recevie messages from socket */
+	static struct isobus_mesg mes;
 	static struct sockaddr_can addr;
-	static struct iovec iov = {&db_val.mes, sizeof(db_val.mes)};
+	static struct iovec iov = {&mes, sizeof(mes)};
 	static char cmsgb[CMSG_SPACE(sizeof(struct sockaddr_can)) +
 		CMSG_SPACE(sizeof(struct timeval))];
 	static struct msghdr msg = {&addr, sizeof(addr), &iov, 1,
@@ -303,29 +304,38 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 
 	/* Print opcode (1 char) */
 	*(cp++) = MESG;
+	/* Print DB key */
+	*(cp++) = nib2hex(db_id >> 28);
+	*(cp++) = nib2hex(db_id >> 24);
+	*(cp++) = nib2hex(db_id >> 20);
+	*(cp++) = nib2hex(db_id >> 16);
+	*(cp++) = nib2hex(db_id >> 12);
+	*(cp++) = nib2hex(db_id >> 8);
+	*(cp++) = nib2hex(db_id >> 4);
+	*(cp++) = nib2hex(db_id);
 	/* Print CAN interface index (1 nibble) */
 	*(cp++) = nib2hex(iface);
 	/* Print PGN (5 nibbles) */
-	*(cp++) = nib2hex(db_val.mes.pgn >> 16);
-	*(cp++) = nib2hex(db_val.mes.pgn >> 12);
-	*(cp++) = nib2hex(db_val.mes.pgn >> 8);
-	*(cp++) = nib2hex(db_val.mes.pgn >> 4);
-	*(cp++) = nib2hex(db_val.mes.pgn);
+	*(cp++) = nib2hex(mes.pgn >> 16);
+	*(cp++) = nib2hex(mes.pgn >> 12);
+	*(cp++) = nib2hex(mes.pgn >> 8);
+	*(cp++) = nib2hex(mes.pgn >> 4);
+	*(cp++) = nib2hex(mes.pgn);
 	/* Print destination address (2 nibbles) */
 	*(cp++) = nib2hex(daddr.can_addr.isobus.addr >> 4);
 	*(cp++) = nib2hex(daddr.can_addr.isobus.addr);
 	/* Print data bytes (4 nibbles length) */
-	*(cp++) = nib2hex(db_val.mes.dlen >> 12);
-	*(cp++) = nib2hex(db_val.mes.dlen >> 8);
-	*(cp++) = nib2hex(db_val.mes.dlen >> 4);
-	*(cp++) = nib2hex(db_val.mes.dlen);
+	*(cp++) = nib2hex(mes.dlen >> 12);
+	*(cp++) = nib2hex(mes.dlen >> 8);
+	*(cp++) = nib2hex(mes.dlen >> 4);
+	*(cp++) = nib2hex(mes.dlen);
 	int j;
-	for(j = 0; j < db_val.mes.dlen; j++)
+	for(j = 0; j < mes.dlen; j++)
 	{
-		*(cp++) = nib2hex(db_val.mes.data[j] >> 4);
-		*(cp++) = nib2hex(db_val.mes.data[j]);
+		*(cp++) = nib2hex(mes.data[j] >> 4);
+		*(cp++) = nib2hex(mes.data[j]);
 	}
-	/* Print tidb_val.mestamp (8 nibbles sec, 5 nibbles usec) */
+	/* Print timestamp (8 nibbles sec, 5 nibbles usec) */
 	*(cp++) = nib2hex(tv.tv_sec >> 28);
 	*(cp++) = nib2hex(tv.tv_sec >> 24);
 	*(cp++) = nib2hex(tv.tv_sec >> 20);
@@ -342,16 +352,16 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	/* Print source address (2 nibbles) */
 	*(cp++) = nib2hex(addr.can_addr.isobus.addr >> 4);
 	*(cp++) = nib2hex(addr.can_addr.isobus.addr);
-	/* Print db_val.message ending */
+	/* Print message ending */
 	*(cp++) = '\n';
-	//*(cp++) = '\0';
 
 	ring_buffer_tail_advance(buf, cp-sp);
 
 	/* Put messaged in leveldb */
 	leveldb_put(db, db_woptions, (char *)&db_id, sizeof(db_id),
-			(char *)&db_val, sizeof(db_val), &db_err);
+			sp+1, cp-sp-1, &db_err);
 	db_id++;
+	leveldb_free(db_err);
 
 	return 1;
 }
@@ -362,7 +372,36 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 	int chars, sent;
 	char *buffer;
 
-	/* Send one message (or part of one) at a time */
+	chars = ring_buffer_unread_bytes(buf);
+
+	/* Try to queue up past data for sending */
+	if(chars < PAST_THRESH) {
+		int i;
+		char *sp, *cp;
+		sp = cp = ring_buffer_tail_address(buf);
+		for(i = 0; i < PAST_CNT && leveldb_iter_valid(db_iter); i++) {
+			size_t len;
+			char *val;
+
+			val = (char *)leveldb_iter_key(db_iter, &len);
+			if(*((db_key_t *)val) >= db_stop) {
+				leveldb_free(val);
+				break;
+			}
+			leveldb_free(val);
+
+			*(cp++) = OLD_MESG;
+			val = (char *)leveldb_iter_value(db_iter, &len);
+			memcpy(cp, val, len);
+			cp += len;
+
+			leveldb_free(val);
+			leveldb_free(db_err);
+			leveldb_iter_next(db_iter);
+		}
+		ring_buffer_tail_advance(buf, sp-cp);
+	}
+
 	buffer = ring_buffer_curs_address(buf);
 	chars = ring_buffer_unread_bytes(buf);
 
@@ -425,6 +464,19 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	invalid = false;
 
 	switch(op) {
+	case GET_PAST:
+	{
+		db_key_t key_start;
+
+		if(sscanf(args, "%8x%8x", &key_start, &db_stop) < 2) {
+			fprintf(stderr, "Invalid past data command\n");
+			break;
+		}
+
+		leveldb_iter_seek(db_iter, (char *)&key_start, sizeof(db_key_t));
+
+		break;
+	}
 	case SET_FILTERS:
 	{
 		char *p;
@@ -688,6 +740,9 @@ int main(int argc, char *argv[]) {
 	leveldb_free(db_err);
 	db_err = NULL;
 	db_woptions = leveldb_writeoptions_create();
+	leveldb_writeoptions_set_sync(db_woptions, false);
+	db_roptions = leveldb_readoptions_create();
+	db_iter = leveldb_create_iterator(db, db_roptions);
 
 	/* Do socket stuff */
 	loop_func(n_fds, read_fds, write_fds, buf, s, ns, bt);
