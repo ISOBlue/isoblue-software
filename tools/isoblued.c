@@ -35,7 +35,7 @@
 #include <unistd.h>
 
 #include <argp.h>
- 
+
 #include <net/if.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -48,7 +48,7 @@
 #include <bluetooth/rfcomm.h>
 
 #include <leveldb/c.h>
- 
+
 #include "../socketcan-isobus/patched/can.h"
 #include "../socketcan-isobus/isobus.h"
 
@@ -73,10 +73,10 @@ sdp_session_t *register_service(uint8_t rfcomm_channel)
     const char *service_prov = "ISOBlue";
 
     uuid_t root_uuid, l2cap_uuid, rfcomm_uuid, svc_uuid;
-    sdp_list_t *l2cap_list = 0, 
+    sdp_list_t *l2cap_list = 0,
                *rfcomm_list = 0,
                *root_list = 0,
-               *proto_list = 0, 
+               *proto_list = 0,
                *access_proto_list = 0;
     sdp_data_t *channel = 0;
 
@@ -264,7 +264,7 @@ static inline char nib2hex(uint_fast8_t nib)
 {
 	nib &= 0x0F;
 
-	return nib >= 10 ? nib - 10 + 'a' : nib + '0'; 
+	return nib >= 10 ? nib - 10 + 'a' : nib + '0';
 }
 
 /* Function to handle incoming ISOBUS message(s) */
@@ -430,6 +430,8 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	static char buffer[CMD_BUF_SIZE] = { 0 };
 	static int curs = 0, tail = 0;
 
+	printf("HERE\n");
+
 	int chars;
 	chars = recv(rc, buffer+tail, CMD_BUF_SIZE-tail, MSG_DONTWAIT);
 	if(chars < 0) {
@@ -438,140 +440,140 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	}
 	tail += chars;
 
-	bool done = false;
-	while(curs < tail) {
-		if(buffer[curs] == '\n' || buffer[curs] == '\r') {
-			done = true;
-			buffer[curs++] = '\0';
+	while(true){
+		bool done = false;
+		while(curs < tail) {
+			if(buffer[curs] == '\n' || buffer[curs] == '\r') {
+				done = true;
+				buffer[curs++] = '\0';
+				break;
+			}
+
+			curs++;
+		}
+		if(!done) {
+			return 0;
+		}
+
+		char op;
+		int sock;
+		char *args, *end;
+		bool invalid;
+
+		op = buffer[0];
+		sock = buffer[1] >= 'a' ? buffer[1] + 10 - 'a' : buffer[1] - '0';
+		args = buffer + 2;
+		end = buffer + curs;
+		invalid = false;
+
+		switch(op) {
+		case GET_PAST:
+		{
+			db_key_t key_start;
+
+			if(sscanf(args, "%8x%8x", &key_start, &db_stop) < 2) {
+				fprintf(stderr, "Invalid past data command\n");
+				break;
+			}
+
+			leveldb_iter_seek(db_iter, (char *)&key_start, sizeof(db_key_t));
+
+			break;
+		}
+		case SET_FILTERS:
+		{
+			char *p;
+			struct isobus_filter *filts;
+			int nfilts;
+
+			if(sscanf(args, "%5x", &nfilts) < 1) {
+				fprintf(stderr, "Invalid filter command\n");
+				break;
+			}
+			p = args + 5;
+
+			if(nfilts == 0) {
+				/* Receive everything when 0 filters given */
+				nfilts = 1;
+				filts = malloc(sizeof(*filts));
+
+				filts[0].pgn = 0;
+				filts[0].pgn_mask = 0;
+				filts[0].daddr = 0;
+				filts[0].daddr_mask = 0;
+				filts[0].saddr = 0;
+				filts[0].saddr_mask = 0;
+			} else {
+				filts = calloc(nfilts, sizeof(*filts));
+
+				int i;
+				for(i = 0; i < nfilts; i++) {
+					int pgn;
+
+					if((p + 5) >= end || sscanf(p, "%5x", &pgn) < 1) {
+						invalid = true;
+						fprintf(stderr, "Invalid filter command\n");
+						break;
+					}
+					p += 5;
+
+					filts[i].pgn = pgn;
+					filts[i].pgn_mask = ISOBUS_PGN_MASK;
+				}
+			}
+			if(!invalid) {
+				if(setsockopt(s[sock], SOL_CAN_ISOBUS, CAN_ISOBUS_FILTER, filts,
+							nfilts * sizeof(*filts)) < 0) {
+					perror("setsockopt");
+				}
+
+				ring_buffer_clear(buf);
+			}
+
+			free(filts);
 			break;
 		}
 
-		curs++;
-	}
-	if(!done) {
-		return 0;
-	}
+		case SEND_MESG:
+		{
+			int nchars;
+			char *p;
+			int pgn;
+			int len;
+			int dest;
 
-	char op;
-	int sock;
-	char *args, *end;
-	bool invalid;
-
-	op = buffer[0];
-	sock = buffer[1] >= 'a' ? buffer[1] + 10 - 'a' : buffer[1] - '0';
-	args = buffer + 2;
-	end = buffer + curs;
-	invalid = false;
-
-	switch(op) {
-	case GET_PAST:
-	{
-		db_key_t key_start;
-
-		if(sscanf(args, "%8x%8x", &key_start, &db_stop) < 2) {
-			fprintf(stderr, "Invalid past data command\n");
-			break;
-		}
-
-		leveldb_iter_seek(db_iter, (char *)&key_start, sizeof(db_key_t));
-
-		break;
-	}
-	case SET_FILTERS:
-	{
-		char *p;
-		struct isobus_filter *filts;
-		int nfilts;
-
-		if(sscanf(args, "%5x", &nfilts) < 1) {
-			fprintf(stderr, "Invalid filter command\n");
-			break;
-		}
-		p = args + 5;
-
-		if(nfilts == 0) {
-			/* Receive everything when 0 filters given */
-			nfilts = 1;
-			filts = malloc(sizeof(*filts));
-
-			filts[0].pgn = 0;
-			filts[0].pgn_mask = 0;
-			filts[0].daddr = 0;
-			filts[0].daddr_mask = 0;
-			filts[0].saddr = 0;
-			filts[0].saddr_mask = 0;
-		} else {
-			filts = calloc(nfilts, sizeof(*filts));
+			sscanf(args, "%5x%2x%4x%n", &pgn, &dest, &len, &nchars);
+			p = args + nchars;
 
 			int i;
-			for(i = 0; i < nfilts; i++) {
-				int pgn;
-
-				if((p + 5) >= end || sscanf(p, "%5x", &pgn) < 1) {
-					invalid = true;
-					fprintf(stderr, "Invalid filter command\n");
-					break;
-				}
-				p += 5;
-
-				filts[i].pgn = pgn;
-				filts[i].pgn_mask = ISOBUS_PGN_MASK;
-			}
-		}
-		if(!invalid) {
-			if(setsockopt(s[sock], SOL_CAN_ISOBUS, CAN_ISOBUS_FILTER, filts,
-						nfilts * sizeof(*filts)) < 0) {
-				perror("setsockopt");
+			unsigned char *data;
+			data = calloc(len, sizeof(*data));
+			for(i = 0; i < len; i++) {
+				sscanf(p, "%2hhx%n", &data[i], &nchars);
+				p += nchars;
 			}
 
-			ring_buffer_clear(buf);
+			struct isobus_mesg mesg = { 0 };
+			mesg.pgn = pgn;
+			mesg.dlen = len;
+			for(i = 0; i < len; i++)
+				mesg.data[i] = data[i];
+
+			struct sockaddr_can addr = { 0 };
+			addr.can_family = AF_CAN;
+			addr.can_addr.isobus.addr = dest;
+
+			sendto(s[sock], &mesg, sizeof(mesg), 0, (struct sockaddr *)&addr,
+					sizeof(addr));
+
+			break;
+		}
 		}
 
-		free(filts);
-		break;
+		memmove(buffer, buffer+curs, tail-curs);
+		tail -= curs;
+		curs = 0;
 	}
-
-	case SEND_MESG:
-	{
-		int nchars;
-		char *p;
-		int pgn;
-		int len;
-		int dest;
-
-		sscanf(args, "%5x%2x%4x%n", &pgn, &dest, &len, &nchars);
-		p = args + nchars;
-
-		int i;
-		unsigned char *data;
-		data = calloc(len, sizeof(*data));
-		for(i = 0; i < len; i++) {
-			sscanf(p, "%2hhx%n", &data[i], &nchars);
-			p += nchars;
-		}
-
-		struct isobus_mesg mesg = { 0 };
-		mesg.pgn = pgn;
-		mesg.dlen = len;
-		for(i = 0; i < len; i++)
-			mesg.data[i] = data[i];
-
-		struct sockaddr_can addr = { 0 };
-		addr.can_family = AF_CAN;
-		addr.can_addr.isobus.addr = dest;
-
-		sendto(s[sock], &mesg, sizeof(mesg), 0, (struct sockaddr *)&addr,
-				sizeof(addr));
-		
-		break;
-	}
-	}
-	
-	memmove(buffer, buffer+curs, tail-curs);
-	tail -= curs;
-	curs = 0;
-
-	return 0;
 }
 
 /* Function that does all the work after initialization */
@@ -642,7 +644,7 @@ static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
 
 int main(int argc, char *argv[]) {
 	fd_set read_fds, write_fds;
-	int n_fds; 
+	int n_fds;
 
 	struct sockaddr_rc rc_addr = { 0 };
 	socklen_t len;
@@ -711,7 +713,7 @@ int main(int argc, char *argv[]) {
 		strcpy(ifr.ifr_name, arguments.ifaces[i]);
 		ioctl(s[i], SIOCGIFINDEX, &ifr);
 		addr.can_family  = AF_CAN;
-		addr.can_ifindex = ifr.ifr_ifindex; 
+		addr.can_ifindex = ifr.ifr_ifindex;
 		addr.can_addr.isobus.addr = ISOBUS_ANY_ADDR;
 
 		if(bind(s[i], (struct sockaddr *)&addr, sizeof(addr)) < 0) {
