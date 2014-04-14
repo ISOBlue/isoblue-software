@@ -225,6 +225,15 @@ typedef uint32_t db_key_t;
 db_key_t db_id = 1, db_stop = 0;
 const db_key_t LEVELDB_ID_KEY = 0;
 leveldb_iterator_t *db_iter;
+static void leveldb_cmp_destroy(void *arg __attribute__ ((unused))) { }
+static int leveldb_cmp_compare(void *arg __attribute__ ((unused)) ,
+		const char *a, size_t alen __attribute__ ((unused)),
+		const char *b, size_t blen __attribute__ ((unused))) {
+	return *((db_key_t *)a) - *((db_key_t *)b);
+}
+static const char * leveldb_cmp_name(void *arg __attribute__ ((unused))) {
+	return "isoblued.v1";
+}
 /* Magic numbers related to past data... */
 #define PAST_THRESH	200
 #define PAST_CNT	4
@@ -233,7 +242,7 @@ leveldb_iterator_t *db_iter;
 static inline void check_send(struct ring_buffer *buf, int rc,
 		fd_set *write_fds)
 {
-	if(ring_buffer_unread_bytes(buf)) {
+	if(ring_buffer_unread_bytes(buf) || db_iter) {
 		FD_SET(rc, write_fds);
 	} else {
 		FD_CLR(rc, write_fds);
@@ -383,7 +392,7 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 	chars = ring_buffer_unread_bytes(buf);
 
 	/* Try to queue up past data for sending */
-	if(chars < PAST_THRESH) {
+	if(db_iter && chars < PAST_THRESH) {
 		int i;
 		char *sp, *cp;
 		sp = cp = ring_buffer_tail_address(buf);
@@ -393,6 +402,8 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 
 			val = (char *)leveldb_iter_key(db_iter, &len);
 			if(*((db_key_t *)val) >= db_stop) {
+				leveldb_iter_destroy(db_iter);
+				db_iter = NULL;
 				break;
 			}
 
@@ -483,6 +494,7 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 				break;
 			}
 
+			db_iter = leveldb_create_iterator(db, db_roptions);
 			leveldb_iter_seek(db_iter, (char *)&key_start, sizeof(db_key_t));
 
 			break;
@@ -741,17 +753,19 @@ int main(int argc, char *argv[]) {
 	/* Initialize Leveldb */
 	db_options = leveldb_options_create();
 	leveldb_options_set_create_if_missing(db_options, 1);
+	leveldb_comparator_t *db_cmp;
+	db_cmp = leveldb_comparator_create(NULL,
+			leveldb_cmp_destroy, leveldb_cmp_compare, leveldb_cmp_name);
+	leveldb_options_set_comparator(db_options, db_cmp);
 	db = leveldb_open(db_options, "isoblued_db", &db_err);
 	if(db_err) {
 		fprintf(stderr, "Leveldb open error.\n");
 		exit(EXIT_FAILURE);
 	}
-	leveldb_free(db_err);
-	db_err = NULL;
 	db_woptions = leveldb_writeoptions_create();
 	leveldb_writeoptions_set_sync(db_woptions, false);
 	db_roptions = leveldb_readoptions_create();
-	db_iter = leveldb_create_iterator(db, db_roptions);
+	db_iter = NULL; //leveldb_create_iterator(db, db_roptions);
 	db_id = 1;
 	size_t read_len;
 	char * read = leveldb_get(db, db_roptions, (char *)&LEVELDB_ID_KEY,
@@ -768,6 +782,7 @@ int main(int argc, char *argv[]) {
 		db_id = *(db_key_t *)read;
 	}
 	printf("starting at db id %d.\n", db_id);
+
 
 	/* Do socket stuff */
 	loop_func(n_fds, read_fds, write_fds, buf, s, ns, bt);
