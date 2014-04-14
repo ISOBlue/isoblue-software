@@ -223,6 +223,7 @@ leveldb_writeoptions_t *db_woptions;
 char *db_err = NULL;
 typedef uint32_t db_key_t;
 db_key_t db_id = 1, db_stop = 0;
+const db_key_t LEVELDB_ID_KEY = 0;
 leveldb_iterator_t *db_iter;
 /* Magic numbers related to past data... */
 #define PAST_THRESH	200
@@ -360,8 +361,15 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	/* Put messaged in leveldb */
 	leveldb_put(db, db_woptions, (char *)&db_id, sizeof(db_id),
 			sp+1, cp-sp-1, &db_err);
+	if(db_err) {
+		fprintf(stderr, "Leveldb write error.\n");
+		leveldb_free(db_err);
+		db_err = NULL;
+		return  -1;
+	}
 	db_id++;
-	leveldb_free(db_err);
+	leveldb_put(db, db_woptions, (char *)&LEVELDB_ID_KEY, sizeof(db_key_t),
+			(char *)&db_id, sizeof(db_id), &db_err);
 
 	return 1;
 }
@@ -385,21 +393,17 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 
 			val = (char *)leveldb_iter_key(db_iter, &len);
 			if(*((db_key_t *)val) >= db_stop) {
-				leveldb_free(val);
 				break;
 			}
-			leveldb_free(val);
 
 			*(cp++) = OLD_MESG;
 			val = (char *)leveldb_iter_value(db_iter, &len);
 			memcpy(cp, val, len);
 			cp += len;
 
-			leveldb_free(val);
-			leveldb_free(db_err);
 			leveldb_iter_next(db_iter);
 		}
-		ring_buffer_tail_advance(buf, sp-cp);
+		ring_buffer_tail_advance(buf, cp-sp);
 	}
 
 	buffer = ring_buffer_curs_address(buf);
@@ -417,6 +421,7 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 		}
 	}
 
+	//printf("BT sent %d.\n", sent);
 	ring_buffer_curs_advance(buf, sent);
 
 	return 1;
@@ -465,6 +470,8 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 		args = buffer + 2;
 		end = buffer + curs;
 		invalid = false;
+
+		printf("Received command %c.\n", op);
 
 		switch(op) {
 		case GET_PAST:
@@ -745,6 +752,22 @@ int main(int argc, char *argv[]) {
 	leveldb_writeoptions_set_sync(db_woptions, false);
 	db_roptions = leveldb_readoptions_create();
 	db_iter = leveldb_create_iterator(db, db_roptions);
+	db_id = 1;
+	size_t read_len;
+	char * read = leveldb_get(db, db_roptions, (char *)&LEVELDB_ID_KEY,
+			sizeof(db_key_t), &read_len, &db_err);
+	if(db_err || !read_len) {
+		leveldb_put(db, db_woptions, (char *)&LEVELDB_ID_KEY, sizeof(db_key_t),
+				(char *)&db_id, sizeof(db_id), &db_err);
+		if(db_err) {
+			fprintf(stderr, "Leveldb db init error.\n");
+		} else {
+			printf("Leveldb init new db.\n");
+		}
+	} else {
+		db_id = *(db_key_t *)read;
+	}
+	printf("starting at db id %d.\n", db_id);
 
 	/* Do socket stuff */
 	loop_func(n_fds, read_fds, write_fds, buf, s, ns, bt);
