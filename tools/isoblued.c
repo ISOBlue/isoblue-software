@@ -314,6 +314,8 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 
 	/* Print opcode (1 char) */
 	*(cp++) = MESG;
+	/* Print CAN interface index (1 nibble) */
+	*(cp++) = nib2hex(iface);
 	/* Print DB key */
 	*(cp++) = nib2hex(db_id >> 28);
 	*(cp++) = nib2hex(db_id >> 24);
@@ -323,8 +325,6 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	*(cp++) = nib2hex(db_id >> 8);
 	*(cp++) = nib2hex(db_id >> 4);
 	*(cp++) = nib2hex(db_id);
-	/* Print CAN interface index (1 nibble) */
-	*(cp++) = nib2hex(iface);
 	/* Print PGN (5 nibbles) */
 	*(cp++) = nib2hex(mes.pgn >> 16);
 	*(cp++) = nib2hex(mes.pgn >> 12);
