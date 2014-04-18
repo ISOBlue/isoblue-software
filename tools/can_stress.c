@@ -35,6 +35,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <stdbool.h>
 
 #include <argp.h>
 
@@ -66,6 +67,7 @@ struct arguments {
 	char **ifaces;
 	int nifaces;
 	int count;
+	bool finite;
 	int length;
 	unsigned int delay;
 };
@@ -77,6 +79,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
 	switch(key) {
 	case 'c':
 		arguments->count = atoi(arg);
+		arguments->finite = (arguments->count > 0);
 		break;
 
 	case 'l':
@@ -144,6 +147,7 @@ int main(int argc, char *argv[])
 		NULL,
 		0,
 		0,
+		false,
 		8,
 		0,
 	};
@@ -218,8 +222,9 @@ int main(int argc, char *argv[])
 			usleep(arguments.delay);
 
 			nums[i]++;
+			arguments.count--;
 		}
-	} while(!arguments.count || --arguments.count);
+	} while(!arguments.finite || (arguments.count > 0));
 
 	return EXIT_SUCCESS;
 }
