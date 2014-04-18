@@ -28,12 +28,13 @@
  * IN THE SOFTWARE.
  */
 
-#define CANSTRESS_VER	"canstress - CAN stress tester 1.1"
+#define CANSTRESS_VER	"canstress - CAN stress tester"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include <argp.h>
 
@@ -51,13 +52,14 @@ const char *argp_program_version = CANSTRESS_VER "\n" BUILD_NUM;
 const char *argp_program_version = CANSTRESS_VER;
 #endif
 const char *argp_program_bug_address = "<bugs@isoblue.org>";
-static char args_doc[] = "IFACE...";
+static char args_doc[] = "IFACE(S)...";
 static char doc[] = "Continually send on IFACE(s) to stress test CAN bus(es).";
 static struct argp_option options[] = {
 	{NULL, 0, NULL, 0, "About", -1},
 	{NULL, 0, NULL, 0, "Configuration", 0},
 	{"count", 'c', "<count>", 0, "Stop after <count> frames", 0},
 	{"length", 'l', "<bytes>", 0, "Send <bytes> bytes of data per frame", 0},
+	{"delay", 'd', "<usecs>", 0, "Put a <usecs> usec delay between frames", 0},
 	{ 0 }
 };
 struct arguments {
@@ -65,10 +67,12 @@ struct arguments {
 	int nifaces;
 	int count;
 	int length;
+	unsigned int delay;
 };
 static error_t parse_opt(int key, char *arg, struct argp_state *state)
 {
 	struct arguments *arguments = state->input;
+	error_t ret = 0;
 
 	switch(key) {
 	case 'c':
@@ -79,16 +83,28 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
 		arguments->length = atoi(arg);
 		break;
 
+	case 'd':
+		arguments->delay = atoi(arg);
+		break;
+
 	case ARGP_KEY_ARGS:
 		arguments->ifaces = state->argv + state->next;
 		arguments->nifaces = state->argc - state->next;
+		break;
+
+	case ARGP_KEY_END:
+		if(arguments->nifaces > 1 && arguments->delay > 0) {
+			fprintf(stderr,
+					"Using a delay with multiple ifaces not yet supported.\n");
+			ret = EINVAL;
+		}
 		break;
 
 	default:
 		return ARGP_ERR_UNKNOWN;
 	}
 
-	return 0;
+	return errno = ret;
 }
 static char *help_filter(int key, const char *text, void *input)
 {
@@ -129,8 +145,12 @@ int main(int argc, char *argv[])
 		0,
 		0,
 		8,
+		0,
 	};
-	argp_parse(&argp, argc, argv, 0, 0, &arguments);
+	if(argp_parse(&argp, argc, argv, 0, 0, &arguments)) {
+		perror(NULL);
+		return EXIT_FAILURE;
+	}
 	
 	socks = calloc(arguments.nifaces, sizeof(*socks));
 	nums = calloc(arguments.nifaces, sizeof(*nums));
@@ -194,6 +214,8 @@ int main(int argc, char *argv[])
 					return EXIT_FAILURE;
 				}
 			}
+
+			usleep(arguments.delay);
 
 			nums[i]++;
 		}
