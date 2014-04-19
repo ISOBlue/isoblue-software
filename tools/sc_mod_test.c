@@ -4,7 +4,7 @@
  * Attempts to send a message, then read messages using the a CAN_ISOBUS socket.
  *
  *
- * Author: Alex Layton <awlayton@purdue.edu>
+ * Author: Alex Layton <alex@layton.in>
  *
  * Copyright (C) 2013 Purdue University
  *
@@ -86,7 +86,7 @@ int main(int argc, char *argv[]) {
 	for(i = 0; i < nfilts; i++) {
 		/* Filter based on PGN */
 		filts[i].pgn = 0;
-		filts[i].pgn_mask = CAN_ISOBUS_PGN_MASK;
+		filts[i].pgn_mask = ISOBUS_PGN_MASK;
 		/* Don't filter based on DA */
 		filts[i].daddr = 0;
 		filts[i].daddr_mask = 0;

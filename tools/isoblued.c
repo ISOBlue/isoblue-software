@@ -27,7 +27,7 @@
  * IN THE SOFTWARE.
  */
 
-#define ISOBLUED_VER	"isoblued - ISOBlue daemon 0.3.1"
+#define ISOBLUED_VER	"isoblued - ISOBlue daemon 0.3.2"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,7 +35,7 @@
 #include <unistd.h>
 
 #include <argp.h>
- 
+
 #include <net/if.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -46,7 +46,9 @@
 #include <bluetooth/sdp.h>
 #include <bluetooth/sdp_lib.h>
 #include <bluetooth/rfcomm.h>
- 
+
+#include <leveldb/c.h>
+
 #include "../socketcan-isobus/patched/can.h"
 #include "../socketcan-isobus/isobus.h"
 
@@ -55,6 +57,10 @@
 enum opcode {
 	SET_FILTERS = 'F',
 	SEND_MESG = 'W',
+	MESG = 'M',
+	ACK = 'A',
+	GET_PAST = 'P',
+	OLD_MESG = 'O',
 };
 
 /* Registers isoblued with the SDP server */
@@ -67,10 +73,10 @@ sdp_session_t *register_service(uint8_t rfcomm_channel)
     const char *service_prov = "ISOBlue";
 
     uuid_t root_uuid, l2cap_uuid, rfcomm_uuid, svc_uuid;
-    sdp_list_t *l2cap_list = 0, 
+    sdp_list_t *l2cap_list = 0,
                *rfcomm_list = 0,
                *root_list = 0,
-               *proto_list = 0, 
+               *proto_list = 0,
                *access_proto_list = 0;
     sdp_data_t *channel = 0;
 
@@ -209,11 +215,34 @@ static struct argp argp = {
 	NULL
 };
 
+/* Leveldb stuff */
+leveldb_t *db;
+leveldb_options_t *db_options;
+leveldb_readoptions_t *db_roptions;
+leveldb_writeoptions_t *db_woptions;
+char *db_err = NULL;
+typedef uint32_t db_key_t;
+db_key_t db_id = 1, db_stop = 0;
+const db_key_t LEVELDB_ID_KEY = 0;
+leveldb_iterator_t *db_iter;
+static void leveldb_cmp_destroy(void *arg __attribute__ ((unused))) { }
+static int leveldb_cmp_compare(void *arg __attribute__ ((unused)) ,
+		const char *a, size_t alen __attribute__ ((unused)),
+		const char *b, size_t blen __attribute__ ((unused))) {
+	return *((db_key_t *)a) - *((db_key_t *)b);
+}
+static const char * leveldb_cmp_name(void *arg __attribute__ ((unused))) {
+	return "isoblued.v1";
+}
+/* Magic numbers related to past data... */
+#define PAST_THRESH	200
+#define PAST_CNT	4
+
 /* Function to check if any messages are buffered */
 static inline void check_send(struct ring_buffer *buf, int rc,
 		fd_set *write_fds)
 {
-	if(ring_buffer_unread_bytes(buf)) {
+	if(ring_buffer_unread_bytes(buf) || db_iter) {
 		FD_SET(rc, write_fds);
 	} else {
 		FD_CLR(rc, write_fds);
@@ -245,7 +274,7 @@ static inline char nib2hex(uint_fast8_t nib)
 {
 	nib &= 0x0F;
 
-	return nib >= 10 ? nib - 10 + 'a' : nib + '0'; 
+	return nib >= 10 ? nib - 10 + 'a' : nib + '0';
 }
 
 /* Function to handle incoming ISOBUS message(s) */
@@ -283,8 +312,19 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	char *sp, *cp;
 	cp = sp = ring_buffer_tail_address(buf);
 
+	/* Print opcode (1 char) */
+	*(cp++) = MESG;
 	/* Print CAN interface index (1 nibble) */
 	*(cp++) = nib2hex(iface);
+	/* Print DB key */
+	*(cp++) = nib2hex(db_id >> 28);
+	*(cp++) = nib2hex(db_id >> 24);
+	*(cp++) = nib2hex(db_id >> 20);
+	*(cp++) = nib2hex(db_id >> 16);
+	*(cp++) = nib2hex(db_id >> 12);
+	*(cp++) = nib2hex(db_id >> 8);
+	*(cp++) = nib2hex(db_id >> 4);
+	*(cp++) = nib2hex(db_id);
 	/* Print PGN (5 nibbles) */
 	*(cp++) = nib2hex(mes.pgn >> 16);
 	*(cp++) = nib2hex(mes.pgn >> 12);
@@ -324,9 +364,21 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 	*(cp++) = nib2hex(addr.can_addr.isobus.addr);
 	/* Print message ending */
 	*(cp++) = '\n';
-	//*(cp++) = '\0';
 
 	ring_buffer_tail_advance(buf, cp-sp);
+
+	/* Put messaged in leveldb */
+	leveldb_put(db, db_woptions, (char *)&db_id, sizeof(db_id),
+			sp+1, cp-sp-1, &db_err);
+	if(db_err) {
+		fprintf(stderr, "Leveldb write error.\n");
+		leveldb_free(db_err);
+		db_err = NULL;
+		return  -1;
+	}
+	db_id++;
+	leveldb_put(db, db_woptions, (char *)&LEVELDB_ID_KEY, sizeof(db_key_t),
+			(char *)&db_id, sizeof(db_id), &db_err);
 
 	return 1;
 }
@@ -337,7 +389,34 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 	int chars, sent;
 	char *buffer;
 
-	/* Send one message (or part of one) at a time */
+	chars = ring_buffer_unread_bytes(buf);
+
+	/* Try to queue up past data for sending */
+	if(db_iter && chars < PAST_THRESH) {
+		int i;
+		char *sp, *cp;
+		sp = cp = ring_buffer_tail_address(buf);
+		for(i = 0; i < PAST_CNT && leveldb_iter_valid(db_iter); i++) {
+			size_t len;
+			char *val;
+
+			val = (char *)leveldb_iter_key(db_iter, &len);
+			if(*((db_key_t *)val) >= db_stop) {
+				leveldb_iter_destroy(db_iter);
+				db_iter = NULL;
+				break;
+			}
+
+			*(cp++) = OLD_MESG;
+			val = (char *)leveldb_iter_value(db_iter, &len);
+			memcpy(cp, val, len);
+			cp += len;
+
+			leveldb_iter_next(db_iter);
+		}
+		ring_buffer_tail_advance(buf, cp-sp);
+	}
+
 	buffer = ring_buffer_curs_address(buf);
 	chars = ring_buffer_unread_bytes(buf);
 
@@ -353,6 +432,7 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 		}
 	}
 
+	//printf("BT sent %d.\n", sent);
 	ring_buffer_curs_advance(buf, sent);
 
 	return 1;
@@ -366,6 +446,8 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	static char buffer[CMD_BUF_SIZE] = { 0 };
 	static int curs = 0, tail = 0;
 
+	printf("HERE\n");
+
 	int chars;
 	chars = recv(rc, buffer+tail, CMD_BUF_SIZE-tail, MSG_DONTWAIT);
 	if(chars < 0) {
@@ -374,127 +456,143 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	}
 	tail += chars;
 
-	bool done = false;
-	while(curs < tail) {
-		if(buffer[curs] == '\n' || buffer[curs] == '\r') {
-			done = true;
-			buffer[curs++] = '\0';
+	while(true){
+		bool done = false;
+		while(curs < tail) {
+			if(buffer[curs] == '\n' || buffer[curs] == '\r') {
+				done = true;
+				buffer[curs++] = '\0';
+				break;
+			}
+
+			curs++;
+		}
+		if(!done) {
+			return 0;
+		}
+
+		char op;
+		int sock;
+		char *args, *end;
+		bool invalid;
+
+		op = buffer[0];
+		sock = buffer[1] >= 'a' ? buffer[1] + 10 - 'a' : buffer[1] - '0';
+		args = buffer + 2;
+		end = buffer + curs;
+		invalid = false;
+
+		printf("Received command %c.\n", op);
+
+		switch(op) {
+		case GET_PAST:
+		{
+			db_key_t key_start;
+
+			if(sscanf(args, "%8x%8x", &key_start, &db_stop) < 2) {
+				fprintf(stderr, "Invalid past data command\n");
+				break;
+			}
+
+			db_iter = leveldb_create_iterator(db, db_roptions);
+			leveldb_iter_seek(db_iter, (char *)&key_start, sizeof(db_key_t));
+
+			break;
+		}
+		case SET_FILTERS:
+		{
+			char *p;
+			struct isobus_filter *filts;
+			int nfilts;
+
+			if(sscanf(args, "%5x", &nfilts) < 1) {
+				fprintf(stderr, "Invalid filter command\n");
+				break;
+			}
+			p = args + 5;
+
+			if(nfilts == 0) {
+				/* Receive everything when 0 filters given */
+				nfilts = 1;
+				filts = malloc(sizeof(*filts));
+
+				filts[0].pgn = 0;
+				filts[0].pgn_mask = 0;
+				filts[0].daddr = 0;
+				filts[0].daddr_mask = 0;
+				filts[0].saddr = 0;
+				filts[0].saddr_mask = 0;
+			} else {
+				filts = calloc(nfilts, sizeof(*filts));
+
+				int i;
+				for(i = 0; i < nfilts; i++) {
+					int pgn;
+
+					if((p + 5) >= end || sscanf(p, "%5x", &pgn) < 1) {
+						invalid = true;
+						fprintf(stderr, "Invalid filter command\n");
+						break;
+					}
+					p += 5;
+
+					filts[i].pgn = pgn;
+					filts[i].pgn_mask = ISOBUS_PGN_MASK;
+				}
+			}
+			if(!invalid) {
+				if(setsockopt(s[sock], SOL_CAN_ISOBUS, CAN_ISOBUS_FILTER, filts,
+							nfilts * sizeof(*filts)) < 0) {
+					perror("setsockopt");
+				}
+
+				ring_buffer_clear(buf);
+			}
+
+			free(filts);
 			break;
 		}
 
-		curs++;
-	}
-	if(!done) {
-		return 0;
-	}
+		case SEND_MESG:
+		{
+			int nchars;
+			char *p;
+			int pgn;
+			int len;
+			int dest;
 
-	char op;
-	int sock;
-	char *args, *end;
-	bool invalid;
-
-	op = buffer[0];
-	sock = buffer[1] >= 'a' ? buffer[1] + 10 - 'a' : buffer[1] - '0';
-	args = buffer + 2;
-	end = buffer + curs;
-	invalid = false;
-
-	switch(op) {
-	case SET_FILTERS:
-	{
-		char *p;
-		struct isobus_filter *filts;
-		int nfilts;
-
-		if(sscanf(args, "%5x", &nfilts) < 1) {
-			fprintf(stderr, "Invalid filter command\n");
-			break;
-		}
-		p = args + 5;
-
-		if(nfilts == 0) {
-			/* Receive everything when 0 filters given */
-			nfilts = 1;
-			filts = malloc(sizeof(*filts));
-
-			filts[0].pgn = 0;
-			filts[0].pgn_mask = 0;
-			filts[0].daddr = 0;
-			filts[0].daddr_mask = 0;
-			filts[0].saddr = 0;
-			filts[0].saddr_mask = 0;
-		} else {
-			filts = calloc(nfilts, sizeof(*filts));
+			sscanf(args, "%5x%2x%4x%n", &pgn, &dest, &len, &nchars);
+			p = args + nchars;
 
 			int i;
-			for(i = 0; i < nfilts; i++) {
-				int pgn;
-
-				if((p + 5) >= end || sscanf(p, "%5x", &pgn) < 1) {
-					invalid = true;
-					fprintf(stderr, "Invalid filter command\n");
-					break;
-				}
-				p += 5;
-
-				filts[i].pgn = pgn;
-				filts[i].pgn_mask = CAN_ISOBUS_PGN_MASK;
-			}
-		}
-		if(!invalid) {
-			if(setsockopt(s[sock], SOL_CAN_ISOBUS, CAN_ISOBUS_FILTER, filts,
-						nfilts * sizeof(*filts)) < 0) {
-				perror("setsockopt");
+			unsigned char *data;
+			data = calloc(len, sizeof(*data));
+			for(i = 0; i < len; i++) {
+				sscanf(p, "%2hhx%n", &data[i], &nchars);
+				p += nchars;
 			}
 
-			ring_buffer_clear(buf);
+			struct isobus_mesg mesg = { 0 };
+			mesg.pgn = pgn;
+			mesg.dlen = len;
+			for(i = 0; i < len; i++)
+				mesg.data[i] = data[i];
+
+			struct sockaddr_can addr = { 0 };
+			addr.can_family = AF_CAN;
+			addr.can_addr.isobus.addr = dest;
+
+			sendto(s[sock], &mesg, sizeof(mesg), 0, (struct sockaddr *)&addr,
+					sizeof(addr));
+
+			break;
+		}
 		}
 
-		free(filts);
-		break;
+		memmove(buffer, buffer+curs, tail-curs);
+		tail -= curs;
+		curs = 0;
 	}
-
-	case SEND_MESG:
-	{
-		int nchars;
-		char *p;
-		int pgn;
-		int len;
-		int dest;
-
-		sscanf(args, "%5x%2x%4x%n", &pgn, &dest, &len, &nchars);
-		p = args + nchars;
-
-		int i;
-		unsigned char *data;
-		data = calloc(len, sizeof(*data));
-		for(i = 0; i < len; i++) {
-			sscanf(p, "%2hhx%n", &data[i], &nchars);
-			p += nchars;
-		}
-
-		struct isobus_mesg mesg = { 0 };
-		mesg.pgn = pgn;
-		mesg.dlen = len;
-		for(i = 0; i < len; i++)
-			mesg.data[i] = data[i];
-
-		struct sockaddr_can addr = { 0 };
-		addr.can_family = AF_CAN;
-		addr.can_addr.isobus.addr = dest;
-
-		sendto(s[sock], &mesg, sizeof(mesg), 0, (struct sockaddr *)&addr,
-				sizeof(addr));
-		
-		break;
-	}
-	}
-	
-	memmove(buffer, buffer+curs, tail-curs);
-	tail -= curs;
-	curs = 0;
-
-	return 0;
 }
 
 /* Function that does all the work after initialization */
@@ -553,6 +651,7 @@ static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
 				if((rc = accept(bt, NULL, NULL)) < 0) {
 					perror("accept");
 				} else {
+					ring_buffer_seek_curs_tail(&buf);
 					FD_SET(rc, &read_fds);
 					FD_SET(rc, &write_fds);
 					n_fds = rc > n_fds ? rc : n_fds;
@@ -565,7 +664,7 @@ static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
 
 int main(int argc, char *argv[]) {
 	fd_set read_fds, write_fds;
-	int n_fds; 
+	int n_fds;
 
 	struct sockaddr_rc rc_addr = { 0 };
 	socklen_t len;
@@ -634,8 +733,8 @@ int main(int argc, char *argv[]) {
 		strcpy(ifr.ifr_name, arguments.ifaces[i]);
 		ioctl(s[i], SIOCGIFINDEX, &ifr);
 		addr.can_family  = AF_CAN;
-		addr.can_ifindex = ifr.ifr_ifindex; 
-		addr.can_addr.isobus.addr = CAN_ISOBUS_ANY_ADDR;
+		addr.can_ifindex = ifr.ifr_ifindex;
+		addr.can_addr.isobus.addr = ISOBUS_ANY_ADDR;
 
 		if(bind(s[i], (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 			perror("bind can");
@@ -651,6 +750,40 @@ int main(int argc, char *argv[]) {
 		FD_SET(s[i], &read_fds);
 		n_fds = s[i] > n_fds ? s[i] : n_fds;
 	}
+
+	/* Initialize Leveldb */
+	db_options = leveldb_options_create();
+	leveldb_options_set_create_if_missing(db_options, 1);
+	leveldb_comparator_t *db_cmp;
+	db_cmp = leveldb_comparator_create(NULL,
+			leveldb_cmp_destroy, leveldb_cmp_compare, leveldb_cmp_name);
+	leveldb_options_set_comparator(db_options, db_cmp);
+	db = leveldb_open(db_options, "isoblued_db", &db_err);
+	if(db_err) {
+		fprintf(stderr, "Leveldb open error.\n");
+		exit(EXIT_FAILURE);
+	}
+	db_woptions = leveldb_writeoptions_create();
+	leveldb_writeoptions_set_sync(db_woptions, false);
+	db_roptions = leveldb_readoptions_create();
+	db_iter = NULL; //leveldb_create_iterator(db, db_roptions);
+	db_id = 1;
+	size_t read_len;
+	char * read = leveldb_get(db, db_roptions, (char *)&LEVELDB_ID_KEY,
+			sizeof(db_key_t), &read_len, &db_err);
+	if(db_err || !read_len) {
+		leveldb_put(db, db_woptions, (char *)&LEVELDB_ID_KEY, sizeof(db_key_t),
+				(char *)&db_id, sizeof(db_id), &db_err);
+		if(db_err) {
+			fprintf(stderr, "Leveldb db init error.\n");
+		} else {
+			printf("Leveldb init new db.\n");
+		}
+	} else {
+		db_id = *(db_key_t *)read;
+	}
+	printf("starting at db id %d.\n", db_id);
+
 
 	/* Do socket stuff */
 	loop_func(n_fds, read_fds, write_fds, buf, s, ns, bt);

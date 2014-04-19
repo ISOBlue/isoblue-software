@@ -11,8 +11,8 @@
  *
  */
 
-#ifndef CAN_ISOBUS_H
-#define CAN_ISOBUS_H
+#ifndef _ISOBUS_H_
+#define _ISOBUS_H_
 
 #include "patched/can.h" /* #include <linux/can.h> */
 
@@ -26,6 +26,7 @@ enum {
 	CAN_ISOBUS_RECV_OWN_MSGS,	/* receive my own msgs (default:off) */
 	CAN_ISOBUS_SEND_PRIO,	/* ISOBUS send priority 0:hi-7:low (default:6) */
 	CAN_ISOBUS_DADDR,	/* directed address of received ISOBUS message */
+	CAN_ISOBUS_NAME,	/* ISOBUS NAME used by this socket */
 };
 
 /* 
@@ -43,7 +44,7 @@ enum {
  * bit 63	: Self-Configurable Address
  */
 typedef __u64 name_t;
-#define CAN_ISOBUS_SC_MASK	0x8000000000000000LU
+#define ISOBUS_NAME_SC_BIT	0x8000000000000000LU
 struct isobus_name {
 	__u8 self_conf_addr : 1;
 	__u8 industry_group : 3;
@@ -69,9 +70,9 @@ struct isobus_filter {
 	/* Flag to invert this filter (excluding interface */
 	int inverted : 1;
 };
-#define CAN_ISOBUS_PGN_MASK	0x03FFFFLU
-#define CAN_ISOBUS_PGN1_MASK	0x03FF00LU
-#define CAN_ISOBUS_ADDR_MASK	0xFFU
+#define ISOBUS_PGN_MASK	0x03FFFFLU
+#define ISOBUS_PGN1_MASK	0x03FF00LU
+#define ISOBUS_ADDR_MASK	0xFFU
 
 /* Transport Protocol */
 #define ISOBUS_MAX_DLEN	1785
@@ -84,12 +85,12 @@ struct isobus_mesg {
 };
 
 /* Network Management */
-#define CAN_ISOBUS_NULL_ADDR	254U
-#define CAN_ISOBUS_GLOBAL_ADDR	255U
-#define CAN_ISOBUS_ANY_ADDR	CAN_ISOBUS_GLOBAL_ADDR
+#define ISOBUS_NULL_ADDR	254U
+#define ISOBUS_GLOBAL_ADDR	255U
+#define ISOBUS_ANY_ADDR	ISOBUS_GLOBAL_ADDR
 #define ISOBUS_PGN_REQUEST	59904LU
 #define ISOBUS_PGN_ADDR_CLAIMED	60928LU
 #define ISOBUS_PGN_COMMANDED_ADDR	65240LU
 
-#endif
+#endif /* _ISOBUS_H_ */
 
