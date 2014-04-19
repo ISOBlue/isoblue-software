@@ -651,6 +651,7 @@ static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
 				if((rc = accept(bt, NULL, NULL)) < 0) {
 					perror("accept");
 				} else {
+					ring_buffer_seek_curs_tail(&buf);
 					FD_SET(rc, &read_fds);
 					FD_SET(rc, &write_fds);
 					n_fds = rc > n_fds ? rc : n_fds;
