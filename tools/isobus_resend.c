@@ -56,6 +56,7 @@ static char args_doc[] = "FILE";
 static char doc[] = "Resend ISOBUS messages recorded in the given file.";
 static struct argp_option options[] = {
 	{NULL, 0, NULL, 0, "About", -1},
+	{"max-delay", 1, "<usecs>", OPTION_HIDDEN, "Max delay time messages", 0},
 	{NULL, 0, NULL, 0, "CAN Setup", 0},
 	{"implement", 'i', "<iface>", 0, "CAN interface for implement bus", 0},
 	{"tractor", 't', "<iface>", OPTION_ALIAS, NULL, 0},
@@ -66,6 +67,7 @@ struct arguments {
 	char *can_imp;
 	char *can_eng;
 	char *fname;
+	long long max_delay;
 };
 static error_t parse_opt(int key, char *arg, struct argp_state *state)
 {
@@ -79,6 +81,10 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
 
 	case 'e':
 		arguments->can_eng = arg;
+		break;
+
+	case 1:
+		arguments->max_delay = atoll(arg);
 		break;
 
 	case ARGP_KEY_ARG:
@@ -126,7 +132,7 @@ static int init_socket(char *ifname)
 
 	if((sock = socket(PF_CAN, SOCK_DGRAM | SOCK_NONBLOCK, CAN_ISOBUS))
 			< 0) {
-		perror("socket (can)");
+		perror("socket");
 		exit(EXIT_FAILURE);
 	}
 
@@ -138,95 +144,110 @@ static int init_socket(char *ifname)
 	addr.can_addr.isobus.addr = ISOBUS_ANY_ADDR;
 
 	if(bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		perror("bind can");
+		perror("bind");
 		exit(EXIT_FAILURE);
 	}
 
 	return sock;
 }
 
-/* Gets called on each row of the query reults) */
-static int handle_row(void *socks, int ncols __attribute__ ((unused)),
-		char **vals, char **names __attribute__ ((unused)))
-{
-	static long long prev_time;
-	long long cur_time;
-	static struct timeval prev_tv;
-	struct timeval cur_tv;
-	int sock;
-	struct isobus_mesg mesg;
-
-	switch(vals[5][0])
-	{
-	/* Send on engine bus */
-	case 'e':
-		sock = ((int *)socks)[0];
-		break;
-
-	/* Send on implement bus */
-	case 't':
-	case 'i':
-		sock = ((int *)socks)[1];
-		break;
-	default:
-		return -1;
-	}
-
-	/* Construct message */
-	mesg.pgn = atoi(vals[1]);
-	mesg.dlen = strlen(vals[2]);
-	memcpy(&mesg.data, vals[2], mesg.dlen);
-
-	cur_time = atoll(vals[6]);
-	gettimeofday(&cur_tv, NULL);
-
-	long long delay = (cur_time - prev_time) -
-		((cur_tv.tv_sec - prev_tv.tv_sec) * 1000000LL +
-		 (cur_tv.tv_usec - prev_tv.tv_usec));
-	if(delay  > 0) {
-		usleep(delay);
-	}
-
-	/* Send message */
-	send(sock, &mesg, sizeof(mesg), 0);
-	prev_time = cur_time;
-	prev_tv = cur_tv;
-
-	return 0;
-}
-
-#define SQL_STMT	"SELECT * FROM isobus_messages ORDER BY time;"
+#define SQL_STMT	"SELECT bus, pgn, data, LENGTH(data) AS dlen, time " \
+	"FROM isobus_messages " \
+	"WHERE time > 0 AND dlen > 0 " \
+	"ORDER BY time;"
 int main(int argc, char *argv[])
 {
 	int socks[2];
 	sqlite3 *db;
-	char *err_msg = NULL;
+	sqlite3_stmt *stmt;
+	struct sockaddr_can addr;
+	long long prev_time = 0;
+	long long cur_time = 0;
+	struct timeval prev_tv = { 0 };
+	struct timeval cur_tv = { 0 };
+	long long delay;
+	int sock;
+	struct isobus_mesg mesg;
 
 	/* Handle options */
 	struct arguments arguments = {
 		"ib_imp",
 		"ib_eng",
 		NULL,
+		1000000LL,
 	};
 	if(argp_parse(&argp, argc, argv, 0, 0, &arguments)) {
-		perror(NULL);
+		perror("argp_parse");
 		return EXIT_FAILURE;
 	}
 
 	/* Create ISOBUS sockets */
 	socks[0] = init_socket(arguments.can_eng);
 	socks[1] = init_socket(arguments.can_imp);
+	addr.can_family = AF_CAN;
+	addr.can_addr.isobus.addr = ISOBUS_GLOBAL_ADDR;
 
 	/* SQLite goodies */
-	sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
 	if(sqlite3_open(arguments.fname, &db)) {
 		fprintf(stderr, "SQLite3 error: %s\n", sqlite3_errmsg(db));
 		sqlite3_close(db);
 		return EXIT_FAILURE;
 	}
+	if(sqlite3_prepare_v2(db, SQL_STMT, -1, &stmt, NULL)) {
+		fprintf(stderr, "Prepared statement failed.\n");
+		return EXIT_FAILURE;
+	}
 
-	sqlite3_exec(db, SQL_STMT, handle_row, socks, &err_msg);
+	while(sqlite3_step(stmt) == SQLITE_ROW) {
 
+		switch(sqlite3_column_text(stmt, 0)[0])
+		{
+		/* Send on engine bus */
+		case 'e':
+			sock = ((int *)socks)[0];
+			break;
+
+		/* Send on implement bus */
+		case 't':
+		case 'i':
+			sock = ((int *)socks)[1];
+			break;
+		default:
+			continue;
+		}
+
+		/* Construct message */
+		mesg.pgn = sqlite3_column_int(stmt, 1);
+		mesg.dlen = sqlite3_column_int(stmt, 3);
+		memcpy(&mesg.data, sqlite3_column_blob(stmt, 2), mesg.dlen);
+
+		/* Figure out when to send this message */
+		cur_time = sqlite3_column_int64(stmt, 4);
+		if(gettimeofday(&cur_tv, NULL)) {
+			perror("gettimeofday");
+			return EXIT_FAILURE;
+		}
+		delay = (cur_time - prev_time) -
+			((cur_tv.tv_sec - prev_tv.tv_sec) * 1000000LL +
+			 (cur_tv.tv_usec - prev_tv.tv_usec));
+		if(delay > 0) {
+			//printf("delay: %lld\n", delay);
+			usleep(delay > arguments.max_delay ? arguments.max_delay : delay);
+		}
+
+		/* Send message */
+		/* TODO: Set SA and DA based on log file */
+		while(sendto(sock, &mesg, sizeof(mesg), 0, (struct sockaddr *)&addr,
+					sizeof(addr)) < 0) {
+			/* Wait briefly, try agian */
+			usleep(1);
+		}
+		prev_time = cur_time;
+		prev_tv = cur_tv;
+	}
+
+	/* Close stuff */
+	sqlite3_finalize(stmt);
 	sqlite3_close(db);
 	return EXIT_SUCCESS;
 }
