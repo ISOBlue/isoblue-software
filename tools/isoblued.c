@@ -374,7 +374,7 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 		fprintf(stderr, "Leveldb write error.\n");
 		leveldb_free(db_err);
 		db_err = NULL;
-		return  -1;
+		return -1;
 	}
 	db_id++;
 	leveldb_put(db, db_woptions, (char *)&LEVELDB_ID_KEY, sizeof(db_key_t),
@@ -614,7 +614,9 @@ static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
 				continue;
 			}
 
-			read_func(s[i], i, &buf);
+			if(read_func(s[i], i, &buf) < 0) {
+				return;
+			}
 		}
 
 		/* Check RFCOMM connection */
