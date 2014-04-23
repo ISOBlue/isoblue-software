@@ -59,8 +59,8 @@ static struct argp_option options[] = {
 	{"max-delay", 1, "<usecs>", OPTION_HIDDEN, "Max delay time messages", 0},
 	{NULL, 0, NULL, 0, "CAN Setup", 0},
 	{"implement", 'i', "<iface>", 0, "CAN interface for implement bus", 0},
-	{"tractor", 't', "<iface>", OPTION_ALIAS, NULL, 0},
-	{"engine", 'e', "<iface>", 0, "CAN interface for engine bus", 0},
+	{"tractor", 't', "<iface>", 0, "CAN interface for tractor/engine bus", 0},
+	{"engine", 'e', NULL, OPTION_ALIAS, NULL, 0},
 	{ 0 }
 };
 struct arguments {
@@ -79,7 +79,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
 		arguments->can_imp = arg;
 		break;
 
-	case 'e':
+	case 't':
 		arguments->can_eng = arg;
 		break;
 
