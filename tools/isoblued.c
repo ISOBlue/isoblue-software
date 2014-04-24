@@ -469,8 +469,6 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	static char buffer[CMD_BUF_SIZE] = { 0 };
 	static int curs = 0, tail = 0;
 
-	printf("HERE\n");
-
 	int chars;
 	chars = recv(rc, buffer+tail, CMD_BUF_SIZE-tail, MSG_DONTWAIT);
 	if(chars < 0) {
@@ -505,7 +503,7 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 		end = buffer + curs;
 		invalid = false;
 
-		printf("Received command %c.\n", op);
+		printf("Received command %c %s\n", op, args);
 
 		switch(op) {
 		case START:
