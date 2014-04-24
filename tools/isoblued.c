@@ -509,6 +509,10 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 
 		switch(op) {
 		case START:
+		{
+			char *cp, *sp;
+
+			/* Reset BT buffer */
 			ring_buffer_clear(buf);
 
 			/* Reset iterator */
@@ -516,7 +520,24 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 				leveldb_iter_destroy(db_iter);
 				db_iter = NULL;
 			}
+
+			/* Repsond with current ID */
+			sp = cp = ring_buffer_tail_address(buf);
+			*(cp++) = START;
+			*(cp++) = 'f';
+			*(cp++) = nib2hex(db_id >> 28);
+			*(cp++) = nib2hex(db_id >> 24);
+			*(cp++) = nib2hex(db_id >> 20);
+			*(cp++) = nib2hex(db_id >> 16);
+			*(cp++) = nib2hex(db_id >> 12);
+			*(cp++) = nib2hex(db_id >> 8);
+			*(cp++) = nib2hex(db_id >> 4);
+			*(cp++) = nib2hex(db_id);
+			*(cp++) = '\n';
+			ring_buffer_tail_advance(buf, cp-sp);
+
 			break;
+		}
 		case GET_PAST:
 		{
 			db_key_t key_start;
