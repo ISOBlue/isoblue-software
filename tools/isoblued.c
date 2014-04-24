@@ -27,7 +27,7 @@
  * IN THE SOFTWARE.
  */
 
-#define ISOBLUED_VER	"isoblued - ISOBlue daemon 0.3.2"
+#define ISOBLUED_VER	"isoblued - ISOBlue daemon"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +61,7 @@ enum opcode {
 	ACK = 'A',
 	GET_PAST = 'P',
 	OLD_MESG = 'O',
+	START = 'S',
 };
 
 /* Registers isoblued with the SDP server */
@@ -432,7 +433,6 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 		}
 	}
 
-	//printf("BT sent %d.\n", sent);
 	ring_buffer_curs_advance(buf, sent);
 
 	return 1;
@@ -485,6 +485,15 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 		printf("Received command %c.\n", op);
 
 		switch(op) {
+		case START:
+			ring_buffer_clear(buf);
+
+			/* Reset iterator */
+			if(db_iter) {
+				leveldb_iter_destroy(db_iter);
+				db_iter = NULL;
+			}
+			break;
 		case GET_PAST:
 		{
 			db_key_t key_start;
@@ -653,7 +662,6 @@ static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
 				if((rc = accept(bt, NULL, NULL)) < 0) {
 					perror("accept");
 				} else {
-					ring_buffer_seek_curs_tail(&buf);
 					FD_SET(rc, &read_fds);
 					FD_SET(rc, &write_fds);
 					n_fds = rc > n_fds ? rc : n_fds;
