@@ -403,7 +403,30 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 
 			val = (char *)leveldb_iter_key(db_iter, &len);
 			if(*((db_key_t *)val) >= db_stop) {
+				/* Past data is done */
 				leveldb_iter_destroy(db_iter);
+				*(cp++) = OLD_MESG;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = '\n';
+				*(cp++) = OLD_MESG;
+				*(cp++) = 1;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = 0;
+				*(cp++) = '\n';
 				db_iter = NULL;
 				break;
 			}
