@@ -66,7 +66,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Alex Layton <alex@layton.in>, "
 		"Urs Thuermann <urs.thuermann@volkswagen.de>, "
 		"Oliver Hartkopp <oliver.hartkopp@volkswagen.de>");
-MODULE_ALIAS("can-proto-" __stringify(ISOBUS));
+MODULE_ALIAS("can-proto-" __stringify(CAN_ISOBUS));
 #ifdef BUILD_NUM
 	MODULE_INFO(build, BUILD_NUM);
 #endif

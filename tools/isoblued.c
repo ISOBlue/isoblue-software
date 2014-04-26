@@ -27,7 +27,7 @@
  * IN THE SOFTWARE.
  */
 
-#define ISOBLUED_VER	"isoblued - ISOBlue daemon 0.3.2"
+#define ISOBLUED_VER	"isoblued - ISOBlue daemon"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +61,7 @@ enum opcode {
 	ACK = 'A',
 	GET_PAST = 'P',
 	OLD_MESG = 'O',
+	START = 'S',
 };
 
 /* Registers isoblued with the SDP server */
@@ -374,7 +375,7 @@ static inline int read_func(int sock, int iface, struct ring_buffer *buf)
 		fprintf(stderr, "Leveldb write error.\n");
 		leveldb_free(db_err);
 		db_err = NULL;
-		return  -1;
+		return -1;
 	}
 	db_id++;
 	leveldb_put(db, db_woptions, (char *)&LEVELDB_ID_KEY, sizeof(db_key_t),
@@ -402,7 +403,30 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 
 			val = (char *)leveldb_iter_key(db_iter, &len);
 			if(*((db_key_t *)val) >= db_stop) {
+				/* Past data is done */
 				leveldb_iter_destroy(db_iter);
+				*(cp++) = OLD_MESG;
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '\n';
+				*(cp++) = OLD_MESG;
+				*(cp++) = '1';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '0';
+				*(cp++) = '\n';
 				db_iter = NULL;
 				break;
 			}
@@ -432,7 +456,6 @@ static inline int send_func(int rc, struct ring_buffer *buf)
 		}
 	}
 
-	//printf("BT sent %d.\n", sent);
 	ring_buffer_curs_advance(buf, sent);
 
 	return 1;
@@ -445,8 +468,6 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 	#define CMD_BUF_SIZE	0x03FFFF
 	static char buffer[CMD_BUF_SIZE] = { 0 };
 	static int curs = 0, tail = 0;
-
-	printf("HERE\n");
 
 	int chars;
 	chars = recv(rc, buffer+tail, CMD_BUF_SIZE-tail, MSG_DONTWAIT);
@@ -482,9 +503,39 @@ static inline int command_func(int rc, struct ring_buffer *buf, int *s)
 		end = buffer + curs;
 		invalid = false;
 
-		printf("Received command %c.\n", op);
+		printf("Received command %c %s\n", op, args);
 
 		switch(op) {
+		case START:
+		{
+			char *cp, *sp;
+
+			/* Reset BT buffer */
+			ring_buffer_clear(buf);
+
+			/* Reset iterator */
+			if(db_iter) {
+				leveldb_iter_destroy(db_iter);
+				db_iter = NULL;
+			}
+
+			/* Repsond with current ID */
+			sp = cp = ring_buffer_tail_address(buf);
+			*(cp++) = START;
+			*(cp++) = 'f';
+			*(cp++) = nib2hex(db_id >> 28);
+			*(cp++) = nib2hex(db_id >> 24);
+			*(cp++) = nib2hex(db_id >> 20);
+			*(cp++) = nib2hex(db_id >> 16);
+			*(cp++) = nib2hex(db_id >> 12);
+			*(cp++) = nib2hex(db_id >> 8);
+			*(cp++) = nib2hex(db_id >> 4);
+			*(cp++) = nib2hex(db_id);
+			*(cp++) = '\n';
+			ring_buffer_tail_advance(buf, cp-sp);
+
+			break;
+		}
 		case GET_PAST:
 		{
 			db_key_t key_start;
@@ -614,7 +665,9 @@ static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
 				continue;
 			}
 
-			read_func(s[i], i, &buf);
+			if(read_func(s[i], i, &buf) < 0) {
+				return;
+			}
 		}
 
 		/* Check RFCOMM connection */
@@ -651,7 +704,6 @@ static inline void loop_func(int n_fds, fd_set read_fds, fd_set write_fds,
 				if((rc = accept(bt, NULL, NULL)) < 0) {
 					perror("accept");
 				} else {
-					ring_buffer_seek_curs_tail(&buf);
 					FD_SET(rc, &read_fds);
 					FD_SET(rc, &write_fds);
 					n_fds = rc > n_fds ? rc : n_fds;
