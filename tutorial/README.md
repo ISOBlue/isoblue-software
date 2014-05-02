@@ -124,6 +124,28 @@ The following commands will install and configure them.
 # ln -fs /usr/src/kernel /lib/modules/`uname -r`/build
 ```
 
+#### Install LevelDB ####
+LevelDB is also needed, but cannot currently be installed with `opkg`.
+You must download the source, compile, and install it as below.
+
+##### Clone the LevelDB git repo #####
+```shell
+$ git clone https://code.google.com/p/leveldb/ ~/leveldb
+```
+
+##### Compile LevelDB #####
+```shell
+$ cd ~/leveldb
+$ make
+```
+
+##### Install LevelDB #####
+```shell
+# cp --preserve=links libleveldb.* /usr/local/lib
+# cp -r include/leveldb /usr/local/include/
+# ldconfig
+```
+
 ### TowerTech Patches ###
 At the time this was written,
 the CAN cape needed changes to the kernel and some modules.
