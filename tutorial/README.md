@@ -239,6 +239,13 @@ $ cd ~/isoblue-software/angstrom
 # cp udev/* /etc/udev/rules.d/
 ```
 
+### Apply changes ###
+In order for the BeagleBone to start working as an ISOBlue,
+it must be restarted after the ISOBlue files have been installed.
+```shell
+# reboot
+```
+
 ## Android Library ##
 ISOBlue is intended to be used with and Anrdoid library.
 That library along with its source code, description, and usage is [here][lib].
