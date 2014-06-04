@@ -1,0 +1,17 @@
+# /etc/systemd/system/bluetooth-terminal@.service
+
+[Unit]
+Description=Root Terminal on RFCOMM Channel %I
+After=bluetooth.service
+Requires=bluetooth.service
+Conflicts=isoblue@%i.service can-log@%i.service
+
+[Service]
+ExecStart=/usr/bin/rfcomm -r listen %I %I /sbin/getty -a root -s rfcomm%i
+Restart=always
+RestartSec=1
+StartLimitInterval=1
+
+[Install]
+Alias=multi-user.target.wants/bluetooth-terminal@1.service
+WantedBy=multi-user.target

@@ -2,13 +2,14 @@
 
 [Unit]
 Description=Bluetooth CAN Log on Channel %I
-After=sysinit.target
-Conflicts=isoblue@%i.service
+After=bluetooth.service
+Requires=bluetooth.service
+Conflicts=isoblue@%i.service bluetooth-terminal@%i.service
 
 [Service]
 ExecStart=/usr/bin/rfcomm watch %I %I /usr/bin/can_log_raw {}
 Restart=always
 
 [Install]
-Alias=multi-user.target.wants/can-log@1.service
+Alias=multi-user.target.wants/can-log@3.service
 WantedBy=multi-user.target
