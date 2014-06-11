@@ -53,7 +53,7 @@ See [here][bbupdate] for Windows directions.
 
 ## Assembly ##
 ![Assembled ISOBlue][bimg]
-[bimg]: http://img825.imageshack.us/img825/5409/f2d8.jpg "Assembled ISOBlue"
+[bimg]: assembled_bb.jpg "Assembled ISOBlue"
 
 ### Bluetooth ###
 Plug the Bluetooth dongle into the BeagleBone Black's USB port.
