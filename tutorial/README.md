@@ -43,7 +43,9 @@ Replace occurrences of `IMAGE` with the file you saved the Angstrom image as.
 ```shell
 $ sudo umount /dev/DEVICE*
 $ xz -dc IMAGE | sudo dd of=/dev/DEVICE
+$ sudo sync
 ```
+Once the last command exits, it is safe to remove the SD card.
 
 ### Windows ###
 See [here][bbupdate] for Windows directions.
@@ -51,7 +53,7 @@ See [here][bbupdate] for Windows directions.
 
 ## Assembly ##
 ![Assembled ISOBlue][bimg]
-[bimg]: http://img825.imageshack.us/img825/5409/f2d8.jpg "Assembled ISOBlue"
+[bimg]: assembled_bb.jpg "Assembled ISOBlue"
 
 ### Bluetooth ###
 Plug the Bluetooth dongle into the BeagleBone Black's USB port.
@@ -130,7 +132,7 @@ You must download the source, compile, and install it as below.
 
 ##### Clone the LevelDB git repo #####
 ```shell
-$ git clone https://code.google.com/p/leveldb/ ~/leveldb
+$ git clone http://code.google.com/p/leveldb/ ~/leveldb
 ```
 
 ##### Compile LevelDB #####
@@ -141,8 +143,8 @@ $ make
 
 ##### Install LevelDB #####
 ```shell
-# cp --preserve=links libleveldb.* /usr/local/lib
-# cp -r include/leveldb /usr/local/include/
+# cp --preserve=links libleveldb.* /usr/lib
+# cp -r include/leveldb /usr/include/
 # ldconfig
 ```
 
@@ -156,7 +158,7 @@ email them and they will send you a link to a new kernel and modules.
 To install them run the commands below,
 replacing `LINK` with the link you got from TowerTech.
 ```shell
-# wget --no-check-certificate -O - LINK | tar -zx -C /
+# wget --no-check-certificate -O - LINK | tar -jx -C /
 # reboot
 ```
 The BeagleBone Black will restart.
