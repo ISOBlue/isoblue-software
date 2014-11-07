@@ -27,7 +27,7 @@ Run `lsblk -d` without the SD card plugged in,
 plug in the SD card, then run `lsblk -d` again.
 The second time there should be a new line corresponding to the SD card.
 Example output is below:
-```shell
+```shellsession
 $ lsblk -d
 NAME MAJ:MIN RM   SIZE RO TYPE MOUNTPOINT
 sda    8:0    0 238.5G  0 disk
@@ -40,7 +40,7 @@ You need what is in the `NAME` column, which is this example is `sdb`.
 Replace occurrences of `DEVICE` with the device of your SD card
 (`sdb` in the example).
 Replace occurrences of `IMAGE` with the file you saved the Angstrom image as.
-```shell
+```shellsession
 $ sudo umount /dev/DEVICE*
 $ xz -dc IMAGE | sudo dd of=/dev/DEVICE
 $ sudo sync
@@ -109,7 +109,7 @@ This can be done with the `passwd` command.
 Run the command and enter your desired password when prompted.
 What you type will not show, just type the password anyway.
 An example is shown below.
-```shell
+```shellsession
 # passwd
 Enter new UNIX password:
 Retype new UNIX password:
@@ -119,7 +119,7 @@ passwd: password updated successfully
 ### Install Packages ###
 There are a few packages needed to get the files, and to compile them.
 The following commands will install and configure them.
-```shell
+```shellsession
 # opkg update
 # opkg install wget git kernel-dev bluez4-dev
 # make -C /usr/src/kernel scripts
@@ -131,18 +131,18 @@ LevelDB is also needed, but cannot currently be installed with `opkg`.
 You must download the source, compile, and install it as below.
 
 ##### Clone the LevelDB git repo #####
-```shell
+```shellsession
 $ git clone http://code.google.com/p/leveldb/ ~/leveldb
 ```
 
 ##### Compile LevelDB #####
-```shell
+```shellsession
 $ cd ~/leveldb
 $ make
 ```
 
 ##### Install LevelDB #####
-```shell
+```shellsession
 # cp --preserve=links libleveldb.* /usr/lib
 # cp -r include/leveldb /usr/include/
 # ldconfig
@@ -157,7 +157,7 @@ After you have bought the cape from TowerTech,
 email them and they will send you a link to a new kernel and modules.
 To install them run the commands below,
 replacing `LINK` with the link you got from TowerTech.
-```shell
+```shellsession
 # wget --no-check-certificate -O - LINK | tar -jx -C /
 # reboot
 ```
@@ -166,7 +166,7 @@ After is has restarted, you will be able to SSH in again and continue.
 The next few commands are so that the source of the regular Angstrom kernel
 will be used to compile modules.
 This is needed because the patched kernel does not come with its source.
-```shell
+```shellsession
 # ln -fs /usr/src/kernel /lib/modules/`uname -r`/build
 # ln -fs /lib/modules/`cat /usr/src/kernel/kernel-abiversion`/extra \
 > /lib/modules/`uname -r`/extra
@@ -178,7 +178,7 @@ In the file `/var/lib/connman/settings` there is a line about Bluetooth
 which is set to false,
 you must change it to true.
 An example of the file's contents is shown below.
-```shell
+```shellsession
 $ cat /var/lib/connman/settings
 [global]
 Timeservers=0.angstrom.pool.ntp.org;1.angstrom.pool.ntp.org;2.angstrom.pool.ntp.org;3.angstrom.pool.ntp.org
@@ -195,12 +195,12 @@ Enable=false
 The line to change happens to be the last one here.
 Under the heading Bluetooth, the line should be `Enable=true`.
 You can edit the file with the following command:
-```shell
+```shellsession
 # nano /var/lib/connman/settings
 ```
 Make the necessary change, then hit Ctrl-O, Enter, Ctrl-X.
 For the change to take effect, you must restart the BeagleBone Black.
-```shell
+```shellsession
 # reboot
 ```
 ## ISOBlue Installation ##
@@ -208,14 +208,14 @@ For the change to take effect, you must restart the BeagleBone Black.
 ### Clone the Git Repo ###
 The code from this repository need to be on the BeagleBone Black.
 The below command clones the repository onto it.
-```shell
+```shellsession
 $ git clone git://github.com/ISOBlue/isoblue-software.git ~/isoblue-software
 ```
 
 ### Compile and Install SocketCAN Modules ###
 The following commands compile, and then install,
 the kernel modules need to use ISOBUS in SocketCAN.
-```shell
+```shellsession
 $ cd ~/isoblue-software/socketcan-isobus
 $ make modules
 # make modules_install
@@ -225,7 +225,7 @@ $ make modules
 ### Compile and Install ISOBlue tools ###
 The following commands compile, and then install,
 all the processes for running or testing ISOBlue.
-```shell
+```shellsession
 $ cd ~/isoblue-software/tools
 $ make
 # make install
@@ -234,7 +234,7 @@ $ make
 ### Install Startup Files ###
 The following commands install the startup files that tell the BeagleBone Black
 how to configure itself on boot.
-```shell
+```shellsession
 $ cd ~/isoblue-software/angstrom
 # cp systemd/* /etc/systemd/system/
 # systemctl enable isoblue.target
@@ -244,7 +244,7 @@ $ cd ~/isoblue-software/angstrom
 ### Apply changes ###
 In order for the BeagleBone to start working as an ISOBlue,
 it must be restarted after the ISOBlue files have been installed.
-```shell
+```shellsession
 # reboot
 ```
 
@@ -260,7 +260,7 @@ ISOBlue needs to be connected to a valid ISOBUS network,
 even to send messages from one program to another on the BeagleBone Black.
 If you would like to try the example below without connecting to an ISOBUS,
 you must run the following commands to put ISOBlue in loopback mode.
-```shell
+```shellsession
 # ifconfig ib_eng down
 # canconfig ib_eng ctrlmode loopback on
 # ifconfig ib_eng up
@@ -279,7 +279,7 @@ Replace `DEVICE` with the CAN device to use
 (for ISOBlue there are *ib_eng* and *ib_imp*).
 Replace `[ADDR]` with a preferred address for the program to claim,
 or leave it out to self configure.
-```shell
+```shellsession
 $ ~/isoblue-software/tools/sc_mod_test DEVICE [ADDR]
 ```
 The program sends a request PGN then listens for messages,
