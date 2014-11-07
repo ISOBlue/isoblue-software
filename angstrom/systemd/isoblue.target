@@ -7,4 +7,5 @@ Description=ISOBlue
 Also=isoblue@2.service
 Also=bluetooth-visibility.service
 Also=isoblue-interfaces.service
-Also=can-log@1.service
+Also=can-log@3.service
+Also=bluetooth-terminal@1.service

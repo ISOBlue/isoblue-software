@@ -4,7 +4,7 @@
 Description=ISOBlue Daemon on Channel %I
 After=bluetooth.service isoblue-interfaces.service tmp.mount
 Requires=bluetooth.service isoblue-interfaces.service tmp.mount
-Conflicts=can-log@%i.service
+Conflicts=bluetooth-terminal@%i.service can-log@%i.service
 
 [Service]
 ExecStartPre=-/usr/bin/isoblued --version
